@@ -1,0 +1,19 @@
+# Virtual environment and build output
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Runtime logs from the helper
+helper.log
+helper.out.log
+helper.err.log
+*.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
