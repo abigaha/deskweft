@@ -178,6 +178,16 @@ tried.
 **Verify screen changes with a screenshot.** Every failure mode above reported
 success. No API return value is trusted for anything visible.
 
+**Credential dialogs stall git commands.** On Windows, `git push` / `git remote
+add` can trigger Git Credential Manager's "Select an account" window (an
+Avalonia top-level window, class `Avalonia-*`). It blocks the command until an
+account is chosen. Its title has no "git" keyword, so a keyword-based window
+scan misses it and the agent waits forever with no output. The rule is shipped
+to every connected client in the server's MCP `instructions`: if a git command
+stalls, call `windows()`, find the new window, then `see(hwnd, with_tree=True)`
+to click the account `ListItem` and `Continue`. Match by title/class, not by pid
+— the dialog belongs to a different process.
+
 ## License
 
 MIT

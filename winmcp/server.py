@@ -9,7 +9,21 @@ from fastmcp.utilities.types import Image
 
 from . import act, launch, tree, win32
 
-mcp = FastMCP(name="winmcp")
+INSTRUCTIONS = """\
+Window-addressed desktop control for Windows. Never takes the foreground unless
+the user has agreed; blocked actions return needs_permission.
+
+Watch for credential dialogs on git operations. `git push` / `git remote add`
+can make Windows Credential Manager open a window titled "Select an account"
+(Avalonia, class `Avalonia-*`). It blocks the git command while it waits, and
+because its title contains no "git" keyword a keyword-based window scan misses
+it - agents then wait forever with no output. If any git command stalls, run
+windows() and look for new top-level windows, then use see(hwnd, with_tree=True)
+to find the account ListItem and the "Continue" button and click them. The
+dialog belongs to a different process, so match by title/class, not by pid.
+"""
+
+mcp = FastMCP(name="winmcp", instructions=INSTRUCTIONS)
 
 
 @mcp.tool
