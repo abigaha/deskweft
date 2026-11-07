@@ -109,18 +109,46 @@ cd $env:LOCALAPPDATA\winmcp
 
 1. **Chromium / Electron / Flutter / games have no Win32 child controls.** `click`
    always goes through the permission gate there.
-2. **Background UIA reads are slow for browsers** (10+ s). The timeout stops it
+2. **Electron apps hide their UI from accessibility unless launched with it on.**
+   See below — this is the difference between a readable app and a black box.
+3. **Background UIA reads are slow for browsers** (10+ s). The timeout stops it
    and returns `timed_out: true` rather than hanging.
-3. **`PrintWindow` returns blank frames** for GPU overlays, protected content and
+4. **`PrintWindow` returns blank frames** for GPU overlays, protected content and
    minimised windows. Reported as `image_unavailable`, never as a blank picture.
-4. **UWP shell windows read as zero elements.** An `ApplicationFrameWindow` really
+5. **UWP shell windows read as zero elements.** An `ApplicationFrameWindow` really
    does contain only empty title-bar and input-sink children; the content lives in
    a separate `CoreWindow`.
-5. **Win32 multiline edits expose no `ScrollPattern`.** Only the mouse wheel moves
+6. **Win32 multiline edits expose no `ScrollPattern`.** Only the mouse wheel moves
    them.
-6. **Chromium inputs return `None` from `ValuePattern.Value`** even when the text
+7. **Chromium inputs return `None` from `ValuePattern.Value`** even when the text
    is there, so read-back verification is impossible; pixel comparison is the only
    check.
+
+### Electron apps are black boxes until accessibility is switched on
+
+Chromium builds its accessibility tree lazily, and an outside UIA client asking
+for it is *not* enough to switch it on. Measured on QQ (Chromium 9.9.22):
+
+| Launch | Elements read | Named |
+|---|---|---|
+| plain | 9 | 0 |
+| `--force-renderer-accessibility` | 128 | 126 |
+
+Those 9 are empty `PaneControl` shells wrapping the D3D surface — no names, no
+addressable controls, nothing to click by name. Edge reads 251 elements with 117
+names because it ships accessibility support enabled.
+
+Launch Electron apps through the tool instead of by hand:
+
+```python
+open_app(r"C:\Program Files\Tencent\QQ.exe", accessibility=True)
+```
+
+A tree of empty `PaneControl`s means the app was started without the flag, not
+that reading failed. Relaunch it rather than reaching for a screenshot: a
+virtualised list (a 2000-member roster, a long message history) never exists on
+screen, so vision reports only the rows that happen to be rendered - which is
+why screenshots "miss" most of a large roster.
 
 ### False successes this tool had to fix
 

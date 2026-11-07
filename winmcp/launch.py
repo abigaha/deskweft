@@ -95,14 +95,23 @@ def launch(
     settle: float = 2.5,
     hide_new_windows: bool = True,
     keep_foreground: bool = True,
+    accessibility: bool = False,
 ) -> dict:
     """Start a program. Its windows are hidden and the user keeps the foreground.
+
+    `accessibility=True` adds --force-renderer-accessibility. Chromium keeps its
+    accessibility tree off until something asks for it, and an outside UIA client
+    asking is not enough: QQ exposed 9 empty shell nodes with the flag off and 128
+    real ones with it on. Without this, an Electron app is a black box - no
+    element names, so no addressing and no reading, only screenshots.
 
     Returns what actually happened, including whether the foreground held. A
     caller that needs the new window visible afterwards can pass
     hide_new_windows=False, but then the user will see it appear.
     """
     cmd = command if not args else f"{command} {args}"
+    if accessibility and "--force-renderer-accessibility" not in cmd:
+        cmd = f"{cmd} --force-renderer-accessibility"
     known = {ctypes.c_void_p(w["hwnd"]).value for w in win32.list_windows()}
     fg_before = win32.foreground()
     title_before = win32.title(fg_before)

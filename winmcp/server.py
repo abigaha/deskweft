@@ -21,13 +21,24 @@ it - agents then wait forever with no output. If any git command stalls, run
 windows() and look for new top-level windows, then use see(hwnd, with_tree=True)
 to find the account ListItem and the "Continue" button and click them. The
 dialog belongs to a different process, so match by title/class, not by pid.
+
+Electron apps (QQ, VS Code, Slack, Discord, Teams) hide their UI from
+accessibility until it is switched on at launch; an outside UIA client cannot
+turn it on afterwards. A QQ window read tree gives 9 empty shell nodes with the
+flag off and 128 named ones with it on - a tree of empty PaneControls means the
+app was started without accessibility, not that the tool failed. When a window
+reads as empty panes and you need its contents, relaunch it with
+open_app(command, accessibility=true). Do not fall back to screenshots for these
+apps: virtualised lists (a 2000-member group roster, a long message history)
+never exist on screen, so vision reports only the rows that happen to be
+rendered.
 """
 
 mcp = FastMCP(name="winmcp", instructions=INSTRUCTIONS)
 
 
 @mcp.tool
-def open_app(command: str, args: str = "", settle: float = 2.5, show: bool = False) -> dict:
+def open_app(command: str, args: str = "", settle: float = 2.5, show: bool = False, accessibility: bool = False) -> dict:
     """Start a program without letting it grab the screen.
 
     Plainly starting an app pops its window in front of whatever the user is
@@ -35,10 +46,18 @@ def open_app(command: str, args: str = "", settle: float = 2.5, show: bool = Fal
     hides the new windows as they appear and hands the foreground back, so the
     user's screen never jumps.
 
+    Set accessibility=True for Electron apps (QQ, VS Code, Slack, Discord...).
+    Chromium keeps its accessibility tree switched off until something asks,
+    and an outside UIA client is not enough - QQ exposes 9 empty shell nodes
+    with the flag off and 128 named ones with it on. Without the flag those
+    windows cannot be read or addressed at all, only screenshotted.
+
     Left at show=False the app runs hidden; call see() on the returned window
     handle to look at it, or reveal() to put it on screen on purpose.
     """
-    result = launch.launch(command, args, settle=settle, hide_new_windows=not show)
+    result = launch.launch(
+        command, args, settle=settle, hide_new_windows=not show, accessibility=accessibility
+    )
     if result.get("hidden_windows"):
         result["hint"] = (
             "Windows are hidden. Use see(hwnd) to inspect one, or reveal(hwnd) "
