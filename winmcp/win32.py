@@ -11,6 +11,7 @@ Three rules, in order:
 from __future__ import annotations
 
 import ctypes
+import os
 import time
 from ctypes import wintypes
 from windows_mcp.uia import ControlFromHandle, Control
@@ -25,10 +26,18 @@ user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
 user32.EnumChildWindows.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.LPARAM]
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
 user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.SendMessageW.restype = wintypes.LPARAM
+DWORD_PTR = ctypes.c_size_t
+user32.SendMessageTimeoutW.argtypes = [
+    wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    wintypes.UINT, wintypes.UINT, ctypes.POINTER(DWORD_PTR),
+]
+user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
@@ -267,3 +276,313 @@ def children(hwnd: int) -> list[dict]:
 
     user32.EnumChildWindows(hwnd, _cb, 0)
     return out
+
+
+# ---------- window messages ----------
+
+WM_NULL = 0x0000
+WM_SETTEXT = 0x000C
+WM_GETTEXT = 0x000D
+WM_GETTEXTLENGTH = 0x000E
+BM_CLICK = 0x00F5
+BM_GETCHECK = 0x00F0
+CB_GETCURSEL = 0x0147
+LB_GETCURSEL = 0x0188
+
+# Messages whose payload is a pointer, a handle or a struct this service does not
+# marshal. allow_unsafe only relaxes the unknown-scalar check, never these.
+_UNMANAGED = frozenset({0x004A, 0x0233})  # WM_COPYDATA, WM_DROPFILES
+
+# Scalars that carry no pointer. The caller still owns the business permission:
+# a click or a keystroke here is a real side effect.
+_SCALARS = frozenset({
+    0x0000, 0x000E, 0x00F5, 0x00F0, 0x0147, 0x0188,
+    0x0100, 0x0101, 0x0102, 0x0201, 0x0202, 0x020A,
+})
+
+# Class tokens that make a checkbox or list message meaningful. WindowsForms
+# names its classes WindowsForms10.BUTTON..., so match anywhere in the string.
+_CLASS_FOR_MESSAGE = {
+    BM_GETCHECK: ("button",),
+    CB_GETCURSEL: ("combobox",),
+    LB_GETCURSEL: ("listbox",),
+}
+
+_BUTTON, _SETTER = BM_CLICK, frozenset({WM_SETTEXT})
+
+SMTO_BLOCK = 0x0001
+SMTO_ABORTIFHUNG = 0x0002
+SMTO_ERRORONEXIT = 0x0020
+
+_PTR_BITS = ctypes.sizeof(ctypes.c_void_p) * 8
+_WPARAM_MAX = (1 << _PTR_BITS) - 1
+_LPARAM_MIN, _LPARAM_MAX = -(1 << (_PTR_BITS - 1)), (1 << (_PTR_BITS - 1)) - 1
+_MAX_UTF16 = 65536
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _payload_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _repair_text(text: str) -> tuple[str, bool]:
+    """Replace lone surrogates so the result can always be encoded as JSON."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace"), True
+    return text, False
+
+
+def _window_pid(hwnd: int) -> int:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value)
+
+
+def _send_scalar(hwnd: int, msg: int, wp: int, lp: int,
+                 timeout_ms: int) -> tuple[int, int, int]:
+    """SendMessageTimeoutW with the result read as a signed pointer-width int."""
+    output = DWORD_PTR()
+    ctypes.set_last_error(0)
+    completed = user32.SendMessageTimeoutW(
+        hwnd, msg, wp, lp,
+        SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+        timeout_ms, ctypes.byref(output),
+    )
+    error = ctypes.get_last_error() if not completed else 0
+    result = ctypes.c_ssize_t(output.value).value
+    return int(bool(completed)), result, error
+
+
+def _foreground_fields(before: int) -> dict:
+    after = foreground()
+    return {"foreground_before": before, "foreground_after": after,
+            "foreground_changed": before != after}
+
+
+def _fail(reason: str, detail: str, before: int, *, state: str = "not_started",
+          **extra) -> dict:
+    out = {"ok": False, "reason": reason, "detail": detail,
+           "execution_state": state, "effect_verified": False,
+           "retry_safe": state == "not_started"}
+    out.update(_foreground_fields(before))
+    out.update(extra)
+    return out
+
+
+def post_message(hwnd: int, msg: int, wparam: int = 0, lparam: int = 0,
+                 allow_unsafe: bool = False,
+                 allow_foreground: bool = False, wait: bool = True,
+                 timeout_ms: int = 1000, text: str | None = None,
+                 max_chars: int = 4096) -> dict:
+    """Send one window message: bounded sync, async queue, or managed text.
+
+    wait=True uses SendMessageTimeoutW and reports `delivery: "returned"` with
+    the message's own result. wait=False queues with PostMessageW and reports
+    only `delivery: "queued"` - a message that arrives later can still change
+    the window after the foreground sample. Neither is proof the user's goal
+    happened; read the window back.
+
+    WM_GETTEXT/WM_SETTEXT are marshalled here, so no pointer ever crosses the
+    protocol. Their read-back verification shares the same timeout budget.
+    """
+    before = foreground()
+    if not _is_int(hwnd) or hwnd <= 0 or hwnd == 0xFFFF or hwnd >= 0x10000000:
+        return _fail("invalid hwnd", f"{hwnd!r} is not a single window handle", before)
+    if not user32.IsWindow(hwnd):
+        return _fail("no such window", f"hwnd {hwnd} is gone", before)
+    if not _is_int(msg) or not 0 <= msg <= 0xFFFF:
+        return _fail("invalid arguments", "msg must be 0..0xffff", before)
+    if not _is_int(wparam) or not 0 <= wparam <= _WPARAM_MAX:
+        return _fail("invalid arguments", f"wparam must be 0..{_WPARAM_MAX}", before)
+    if not _is_int(lparam) or not _LPARAM_MIN <= lparam <= _LPARAM_MAX:
+        return _fail("invalid arguments",
+                     f"lparam must be {_LPARAM_MIN}..{_LPARAM_MAX}", before)
+    if not _is_int(timeout_ms) or not 1 <= timeout_ms <= 30000:
+        return _fail("invalid arguments", "timeout_ms must be 1..30000", before)
+    if not _is_int(max_chars) or not 1 <= max_chars <= _MAX_UTF16:
+        return _fail("invalid arguments", "max_chars must be 1..65536", before)
+    if not isinstance(wait, bool) or not isinstance(allow_unsafe, bool) \
+            or not isinstance(allow_foreground, bool):
+        return _fail("invalid arguments", "wait/allow_unsafe/allow_foreground must be bools",
+                     before)
+    if msg in _UNMANAGED:
+        return _fail("message payload unsupported",
+                     f"0x{msg:04X} carries a payload this service cannot marshal", before)
+
+    is_text = msg in (WM_GETTEXT, WM_SETTEXT)
+    if is_text:
+        # Validate the managed-text contract before any permission gate, so a
+        # caller learns its own arguments are wrong instead of being denied.
+        bad = _text_argument_error(msg, wparam, lparam, text)
+        if bad:
+            return _fail("invalid arguments", bad, before)
+        if not wait:
+            return _fail("invalid arguments", "managed text needs a synchronous call", before)
+    else:
+        checks = _CLASS_FOR_MESSAGE.get(msg)
+        if checks:
+            actual = class_name(hwnd).casefold()
+            if not any(token in actual for token in checks):
+                return _fail("control class mismatch",
+                             f"class {class_name(hwnd)!r} cannot answer 0x{msg:04X}", before)
+        elif msg in _SCALARS or msg in (WM_NULL,):
+            pass
+        elif not allow_unsafe:
+            return _fail("unsafe message",
+                         f"0x{msg:04X} is not a known scalar; pass allow_unsafe=true "
+                         "only after confirming it carries no pointer or handle", before)
+
+    controlled = msg in _SETTER or msg == BM_CLICK or (msg not in _SCALARS and not is_text)
+    if controlled and not allow_foreground:
+        result = _fail("needs permission",
+                       f"0x{msg:04X} may change the window or its data", before)
+        result["needs_permission"] = True
+        return result
+    if not wait and msg in (WM_GETTEXT, WM_GETTEXTLENGTH, BM_GETCHECK,
+                            CB_GETCURSEL, LB_GETCURSEL):
+        return _fail("query requires wait",
+                     f"0x{msg:04X} asks a question; queuing it would drop the answer", before)
+    if wait and _window_pid(hwnd) == os.getpid():
+        return _fail("same process",
+                     "a same-queue window can block past the timeout and outlive the buffer",
+                     before)
+
+    if is_text:
+        return _post_text(hwnd, msg, wait, timeout_ms, text, max_chars, before)
+
+    if wait:
+        completed, result, error = _send_scalar(hwnd, msg, wparam, lparam, timeout_ms)
+        if not completed:
+            reason = "message timed out" if error == 1460 else "message delivery failed"
+            return _fail(reason, f"SendMessageTimeoutW returned 0, LastError={error}",
+                         before, state="unknown", error=error)
+        out = {"ok": True, "delivery": "returned", "result": result,
+               "call_completed": True, "execution_state": "completed",
+               "effect_verified": False}
+        # -1 from a list or combo is a real "nothing selected", not a 64-bit value.
+        if msg in (CB_GETCURSEL, LB_GETCURSEL):
+            out["selection_index"] = result
+        out.update(_foreground_fields(before))
+        return out
+
+    posted = user32.PostMessageW(hwnd, msg, wparam, lparam)
+    if not posted:
+        error = ctypes.get_last_error()
+        return _fail("message delivery failed", f"PostMessageW returned 0, LastError={error}",
+                     before, error=error)
+    out = {"ok": True, "delivery": "queued", "effect_verified": False, "call_completed": True}
+    out.update(_foreground_fields(before))
+    return out
+
+
+def _text_argument_error(msg: int, wparam: int, lparam: int, text) -> str | None:
+    """The managed-text rules, checked before anything is sent."""
+    if wparam or lparam:
+        return "managed text sets wparam/lparam itself; pass both as 0"
+    if msg == WM_GETTEXT:
+        return None if text is None else "WM_GETTEXT does not take text"
+    if text is None or not isinstance(text, str) or "\x00" in text:
+        return "text must be a string without NULs"
+    units = _payload_units(text)
+    if units > _MAX_UTF16:
+        return f"text is {units} UTF-16 units; the limit is {_MAX_UTF16}"
+    return None
+
+
+def _post_text(hwnd: int, msg: int, wait: bool, timeout_ms: int, text: str | None,
+               max_chars: int, before: int) -> dict:
+    """WM_GETTEXT/WM_SETTEXT with a service-owned buffer; no pointer is exposed."""
+    if msg == WM_GETTEXT:
+        return _read_text(hwnd, WM_GETTEXT, 0, max_chars, timeout_ms, before)
+    return _write_text(hwnd, text, _payload_units(text), timeout_ms, max_chars, before)
+
+
+def _read_text(hwnd: int, msg: int, wp: int, capacity: int, timeout_ms: int,
+               before: int, *, internal: bool = False) -> dict:
+    """Read text into a buffer this service owns for the whole call."""
+    buf = ctypes.create_unicode_buffer(capacity + 1)
+    argument = wp if internal else capacity
+    completed, result, error = _send_scalar(hwnd, msg, argument,
+                                            ctypes.cast(buf, ctypes.c_void_p).value,
+                                            timeout_ms)
+    if not completed:
+        reason = "message timed out" if error == 1460 else "message delivery failed"
+        # A timed-out read has no trustworthy contents; report no fragment.
+        return _fail(reason, f"LastError={error}; the buffer was not read",
+                     before, state="unknown", error=error)
+    if not 0 <= result < capacity + 1:
+        return _fail("invalid message result",
+                     f"0x{msg:04X} reported {result} for a {capacity}-unit buffer",
+                     before, state="completed")
+    raw = buf.value if result else ""
+    value, repaired = _repair_text(raw)
+    out = {"ok": True, "delivery": "returned", "result": result, "text": value,
+           "capacity": capacity, "call_completed": True, "execution_state": "completed",
+           "effect_verified": False, "possibly_truncated": result >= capacity}
+    if repaired:
+        out["text_repaired"] = True
+    if internal:
+        return out
+    out.update(_foreground_fields(before))
+    return out
+
+
+def _write_text(hwnd: int, text: str, units: int, timeout_ms: int, max_chars: int,
+                before: int) -> dict:
+    """WM_SETTEXT, then read back within the same budget; malformed is not success."""
+    started = time.monotonic()
+    deadline = started + timeout_ms / 1000
+    buf = ctypes.create_unicode_buffer(text, units + 1)
+    completed, result, error = _send_scalar(hwnd, WM_SETTEXT, 0,
+                                            ctypes.cast(buf, ctypes.c_void_p).value,
+                                            timeout_ms)
+    if not completed:
+        reason = "message timed out" if error == 1460 else "message delivery failed"
+        return _fail(reason, f"LastError={error}; do not resend automatically",
+                     before, state="unknown", error=error)
+    if result == 0:
+        out = {"ok": False, "reason": "control rejected text",
+               "detail": "WM_SETTEXT returned 0", "result": 0, "delivery": "returned",
+               "call_completed": True, "execution_state": "completed",
+               "effect_verified": False, "retry_safe": False}
+        out.update(_foreground_fields(before))
+        return out
+
+    preview, _repaired = _repair_text(text[:max_chars])
+    out = {"ok": True, "delivery": "returned", "result": result, "call_completed": True,
+           "effect_verified": False, "text_preview": preview,
+           "possibly_truncated": len(text) > max_chars}
+    remaining = int((deadline - time.monotonic()) * 1000)
+    if remaining <= 0:
+        out.update(_foreground_fields(before))
+        out["verification_reason"] = "budget exhausted"
+        return out
+
+    # n+2 units: enough to see one trailing unit beyond the input, so a longer
+    # existing value shows up as a mismatch instead of a silent match.
+    capacity = min(units + 1, _MAX_UTF16 + 2)
+    back = _read_text(hwnd, WM_GETTEXT, capacity, capacity, remaining, before,
+                      internal=True)
+    out.update(_foreground_fields(before))
+    if not back["ok"]:
+        out["verification_reason"] = "readback unavailable"
+        out["verification_error"] = back["reason"]
+        return out
+    if back["result"] >= capacity:
+        out["verification_reason"] = "readback incomplete"
+        return out
+    if back["text"] == text:
+        out["effect_verified"] = True
+        return out
+    failed = {"ok": False, "reason": "text readback mismatch",
+              "detail": f"the control now holds {back['text'][:80]!r}",
+              "result": result, "delivery": "returned", "call_completed": True,
+              "execution_state": "completed", "effect_verified": False,
+              "retry_safe": False}
+    failed.update(_foreground_fields(before))
+    return failed
