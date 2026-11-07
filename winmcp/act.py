@@ -201,6 +201,29 @@ def act(
             "and both move the foreground to that window.",
         )
 
+    # Tier 2a: routes that work without bringing the window forward.
+    # Reading the tree and calling a UIA pattern does not need the foreground on
+    # a well-behaved provider, and Chromium's legacy route does not either. Try
+    # these first - activating unconditionally is what made every click on an
+    # Electron app steal the foreground even when it could have stayed behind.
+    elements, _ = tree.read(hwnd, timeout_ms=3000, max_elements=600)
+    hit = tree.find(elements, target)
+    el = hit["_el"] if hit else None
+
+    if action == "click" and el is not None:
+        legacy = tree.pattern(el, "LegacyIAccessiblePattern")
+        if legacy is not None:
+            try:
+                legacy.DoDefaultAction()
+                done = _done(hwnd, action, target, "uia:legacy-default", fg_before, start)
+                if not done["foreground_changed"]:
+                    return done
+                # It took the foreground after all; report it honestly below.
+                return done
+            except Exception:
+                pass
+
+    # Tier 2b: everything from here may take the foreground.
     # A background process cannot simply call SetForegroundWindow; Windows
     # refuses silently. win32.activate does the documented workaround and
     # reports whether it worked. If it did not, callers must not type: the
@@ -217,9 +240,10 @@ def act(
             "foreground_changed": win32.foreground() != fg_before,
         }
 
-    elements, _ = tree.read(hwnd, timeout_ms=3000, max_elements=600)
-    hit = tree.find(elements, target)
-    el = hit["_el"] if hit else None
+    if el is None:
+        elements, _ = tree.read(hwnd, timeout_ms=3000, max_elements=600)
+        hit = tree.find(elements, target)
+        el = hit["_el"] if hit else None
 
     if action == "click":
         if el is not None:

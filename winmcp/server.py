@@ -23,15 +23,22 @@ to find the account ListItem and the "Continue" button and click them. The
 dialog belongs to a different process, so match by title/class, not by pid.
 
 Electron apps (QQ, VS Code, Slack, Discord, Teams) hide their UI from
-accessibility until it is switched on at launch; an outside UIA client cannot
-turn it on afterwards. A QQ window read tree gives 9 empty shell nodes with the
-flag off and 128 named ones with it on - a tree of empty PaneControls means the
-app was started without accessibility, not that the tool failed. When a window
-reads as empty panes and you need its contents, relaunch it with
-open_app(command, accessibility=true). Do not fall back to screenshots for these
-apps: virtualised lists (a 2000-member group roster, a long message history)
-never exist on screen, so vision reports only the rows that happen to be
-rendered.
+accessibility until it is switched on at launch, and Chromium then throws the
+tree away whenever another window comes forward - an outside UIA client cannot
+turn it back on. Measured on QQ: 128 elements in front, 0 behind, recovering
+only on refocus; the fix is to launch with open_app(..., accessibility=true),
+which passes the flags that keep the tree alive in the background. A tree of
+empty PaneControls, or one that empties when you focus your own window, means
+the app was started without those flags - not that the tool failed.
+
+Prefer the legacy accessibility route for clicks on these apps: click() tries
+LegacyIAccessible's DoDefaultAction before InvokePattern, because on Chromium
+invoke goes through IA2, focuses the widget and steals the foreground, while the
+legacy call does the same work leaving cursor and foreground untouched.
+
+Do not fall back to screenshots for these apps: virtualised lists (a 2000-member
+group roster, a long message history) never exist on screen, so vision reports
+only the rows that happen to be rendered.
 """
 
 mcp = FastMCP(name="winmcp", instructions=INSTRUCTIONS)
@@ -47,10 +54,15 @@ def open_app(command: str, args: str = "", settle: float = 2.5, show: bool = Fal
     user's screen never jumps.
 
     Set accessibility=True for Electron apps (QQ, VS Code, Slack, Discord...).
-    Chromium keeps its accessibility tree switched off until something asks,
-    and an outside UIA client is not enough - QQ exposes 9 empty shell nodes
-    with the flag off and 128 named ones with it on. Without the flag those
-    windows cannot be read or addressed at all, only screenshotted.
+    Two Chromium behaviours make this necessary, both measured on QQ:
+
+    - Chromium keeps its accessibility tree off until asked at launch; an outside
+      UIA client cannot switch it on. 9 unnamed shell nodes without the flag,
+      128 named ones with it.
+    - Chromium throws the tree away when another window comes forward. The same
+      window reads 128 elements in front and 0 behind, and recovers on refocus.
+      The flags passed here stop that, so the app stays readable in the
+      background instead of only while it holds the foreground.
 
     Left at show=False the app runs hidden; call see() on the returned window
     handle to look at it, or reveal() to put it on screen on purpose.

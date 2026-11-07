@@ -135,20 +135,42 @@ for it is *not* enough to switch it on. Measured on QQ (Chromium 9.9.22):
 | `--force-renderer-accessibility` | 128 | 126 |
 
 Those 9 are empty `PaneControl` shells wrapping the D3D surface — no names, no
-addressable controls, nothing to click by name. Edge reads 251 elements with 117
-names because it ships accessibility support enabled.
+addressable controls, nothing to click by name.
 
-Launch Electron apps through the tool instead of by hand:
+**And Chromium throws the tree away again as soon as another window comes
+forward.** Same window, same session, only the foreground changed:
 
-```python
-open_app(r"C:\Program Files\Tencent\QQ.exe", accessibility=True)
-```
+| Foreground | Elements |
+|---|---|
+| QQ | 132 |
+| your editor | 0 |
+| QQ again | 132 |
 
-A tree of empty `PaneControl`s means the app was started without the flag, not
-that reading failed. Relaunch it rather than reaching for a screenshot: a
-virtualised list (a 2000-member roster, a long message history) never exists on
-screen, so vision reports only the rows that happen to be rendered - which is
-why screenshots "miss" most of a large roster.
+That is why an agent can read a window one moment and find nothing the next.
+Two flags stop it, and either one alone is enough:
+
+- `--disable-backgrounding-occluded-windows`
+- `--disable-features=CalculateNativeWinOcclusion`
+
+`open_app(..., accessibility=True)` passes all three flags. With them a
+backgrounded QQ reads 132 elements on every poll while your editor keeps the
+foreground.
+
+### Clicks that never steal the foreground
+
+UIA `InvokePattern` on Chromium goes through IA2, which focuses the widget and
+takes the foreground. `LegacyIAccessible.DoDefaultAction` does the same work
+through MSAA and leaves focus alone. Measured on the same backgrounded window:
+
+| Route | Effect landed | Cursor moved | Foreground moved |
+|---|---|---|---|
+| `LegacyIAccessible.DoDefaultAction` | yes | no | **no** |
+| `InvokePattern` | no | no | **yes** |
+| posted `WM_LBUTTONDOWN` to render host | no | no | no |
+
+So `click()` tries the legacy route first, before touching the window's
+activation state at all. Only if that finds no target does it bring the window
+forward and fall back to the modern patterns.
 
 ### False successes this tool had to fix
 

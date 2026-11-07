@@ -110,8 +110,20 @@ def launch(
     hide_new_windows=False, but then the user will see it appear.
     """
     cmd = command if not args else f"{command} {args}"
-    if accessibility and "--force-renderer-accessibility" not in cmd:
-        cmd = f"{cmd} --force-renderer-accessibility"
+    if accessibility:
+        # Three flags, each measured on QQ (a Chromium app):
+        #   --force-renderer-accessibility turns the tree on at all (9 -> 128 elements)
+        #   --disable-backgrounding-occluded-windows and
+        #   --disable-features=CalculateNativeWinOcclusion stop Chromium from throwing
+        #   the tree away when another window comes forward. Without them the same
+        #   window reads 128 in front and 0 behind; either one alone is enough.
+        for flag in (
+            "--force-renderer-accessibility",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=CalculateNativeWinOcclusion",
+        ):
+            if flag not in cmd:
+                cmd = f"{cmd} {flag}"
     known = {ctypes.c_void_p(w["hwnd"]).value for w in win32.list_windows()}
     fg_before = win32.foreground()
     title_before = win32.title(fg_before)
