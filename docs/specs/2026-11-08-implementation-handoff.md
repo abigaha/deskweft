@@ -290,42 +290,141 @@ with _write_lock:
 
 序列化与 schema 校验先完成，才创建临时文件；唯一临时文件与目标在同目录。替换失败向调用方报错、保留旧文件。读调用依赖整文件替换，无需看到半条记录；`os.replace` 本身不能防止并发更新丢失。本轮不承诺断电后的目录持久性或服务外编辑器的并发写入安全。
 
-## 3. appinfo.py：报告证据，不猜活动版本
+## 3. appinfo.py：证据链取版本，逐级兜底
+
+版本来源不是单一途径加一条兜底，而是**一条有优先级的证据链**：每一级都标明它能证明什么、不能证明什么，取到就停，同时在返回值里如实报告用了哪一级。
+
+### 3.0 为什么必须多级（实测对照，2026-11-08）
+
+同一套探测方法在 QQ 和 Edge 上得到完全不同的结果：
+
+| 来源 | QQ | Edge |
+|---|---|---|
+| 1 exe 路径里的 `versions/` 段 | `None` | `None` |
+| 2 子进程命令行 `--app-path` | **`9.9.22`** | `None` |
+| 3 唯一候选目录 | `9.9.22-40824` | 无目录 |
+| 4 `versions/` 候选列表 | `['9.9.22-40824']` | `[]` |
+| 5 `FileVersion` | `9.9.19.35469`（**落后**） | `157.0.4341.42`（**正确**） |
+| 6 `ProductVersion` | `9.9.19.35469-12e4987f` | `157.0.4341.42` |
+| 7 同级数字目录 | `None` | `157.0.4341.42` |
+
+**结论：没有哪一级能覆盖所有应用。** QQ 只有 2/3 得到真实构建，Edge 只有 5/6/7。任何单级实现的方案都会在其中一类应用上返回 `None`。
+
+### 3.1 接口
 
 ```python
 def app_info(hwnd: int) -> dict: ...
-def _process_path(pid: int) -> str: ...
+def _process_path(pid: int) -> str | None: ...
 def _file_version_info(exe: str) -> dict: ...
-def _active_version(exe: Path, file_version: str | None) -> tuple[str | None, str | None]: ...
+def _version_evidence(pid: int, exe: str | None,
+                      info: dict) -> tuple[str | None, str, list[str]]: ...
 ```
 
-1. 先验证正整数 hwnd 及 `IsWindow`；以 `GetWindowThreadProcessId` 取 pid。
-2. `_process_path` 用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION=0x1000)`、`QueryFullProcessImageNameW`，动态扩大路径缓冲；`finally: CloseHandle`。为新增 ctypes API 明确 pointer-sized argtypes/restype，不能依赖默认 int 句柄。
-3. `_file_version_info` 使用 `version.dll` 的 `GetFileVersionInfoSizeW`、`GetFileVersionInfoW`、`VerQueryValueW`。`\\` 下的 `VS_FIXEDFILEINFO` 给完整四段 `file_version`；`StringFileInfo` 按 `VarFileInfo\\Translation` 读取 `ProductName/CompanyName`。没有资源则对应字段为 None，不能让 `fv/info` 未初始化。
-4. 仅当 **exe 实际路径**包含 `versions/<数字版本[-build]>/...` 时，才用该活动目录名中 `-` 前的完整版本，`source="program_dir"`。仅枚举安装目录不能证明活动版本，不排序选最大目录。
-5. 其余使用完整 `file_version`、`source="file_version"`；仍未知时 `version=None, source=None`。不截前两段，不伪造 `unknown` 精确 key。
-6. 可枚举 exe 所在目录下 `versions/`，只收录 `is_dir()` 且完整匹配 `\d+(\.\d+)+(-\d+)?` 的名称，作为 `version_candidates`。它们只供诊断，不能替换活动版本。找不到目录返回空列表，权限失败记录 warning。
-7. **QQ 类启动器的补充来源（实测，2026-11-08）**：第 4 条的路径规则对 QQ 不成立——主进程 exe 就是 `C:\Program Files\Tencent\QQ.exe`，路径里不含 `versions/`。真实活动版本只出现在**子进程的命令行**里：
+`_version_evidence` 返回 `(version, source, warnings)`。`source` 取值固定：
 
-   ```
-   --app-path="C:\Program Files\Tencent\versions\9.9.22-40824\resources\app"
-   ```
+| source | 含义 | 可信度 |
+|---|---|---|
+| `path_segment` | exe 路径本身含活动构建目录 | 最高：直接证明 |
+| `child_cmdline` | 子进程命令行指向构建目录 | 高：启动器结构下间接证明 |
+| `sole_candidate` | 唯一候选目录，无其他解释 | 中：推断，须附 warning |
+| `file_version` | 文件资源版本 | 中：可能落后于实际构建 |
+| `sibling_dir` | 同级数字目录 | 低：启发式 |
+| `None` | 无证据 | — |
 
-   三个来源实测对照：
+### 3.2 取版本顺序（逐级，取到即停）
 
-   | 来源 | QQ 的值 | 可否作活动版本 |
-   |---|---|---|
-   | 主进程 exe 路径 | `...\Tencent\QQ.exe` | 否，不含版本 |
-   | `FileVersion` | `9.9.19.35469` | 否，落后于实际 |
-   | 子进程 `--app-path` | `9.9.22-40824` | **是** |
+```
+1. path_segment
+   exe 路径匹配 [\\/]versions[\\/](\d+(?:\.\d+)+(?:-\d+)?)
+   → 取 "-" 前完整版本。QQ/Edge 都不命中，但这是唯一直接证明的方式。
 
-   所以在第 4 条失败后、回退 `file_version` 之前，插入一步：用 `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 或 `NtQueryInformationProcess` 枚举**同一 pid 的子进程**，读它们的命令行，正则取 `versions[\\/](\d+(?:\.\d+)+(?:-\d+)?)`。
+2. child_cmdline
+   用 psutil 枚举同 pid 的直接子进程，读命令行（§3.3 已实测可行，非管理员亦可），
+   匹配同样的 versions/ 模式。
+   → QQ 命中 9.9.22。实测 5 个子进程同时给出该值。
 
-   读子进程命令行需要 `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`，且跨进程读 `PEB` 需要 `NtQueryInformationProcess` + `ReadProcessMemory`。**若实现成本过高**，可退而求其次：枚举 `versions/` 目录，只有存在**恰好一个**候选时才用它（`source="sole_candidate"`），并在 `warnings` 里写明「由唯一候选推断，未直接验证」。多候选时必须返回 `None`，不许猜。
+3. sole_candidate
+   枚举 os.path.dirname(exe)/versions/ 下的目录，
+   名必须完整匹配 \d+(?:\.\d+)+(?:-\d+)?（注意：必须保留 -(build) 后缀，
+    只写 \d+(?:\.\d+)+ 会漏掉 9.9.22-40824，见 §3.4）。
+   恰好一个候选才采用，并写 warning "inferred from sole candidate, not verified"。
+   零个或多个 → 跳过，禁止猜。
 
-   两种做法都要在返回值里如实标 `source`，让调用方知道可信度。
+4. file_version
+   version.dll: GetFileVersionInfoSizeW → GetFileVersionInfoW → VerQueryValueW。
+   取 VS_FIXEDFILEINFO 的完整四段。绝不截前两段（9.9.19.35469 截成 9.9 是错的）。
+   → Edge 命中 157.0.4341.42。
 
-返回字段固定：
+5. sibling_dir
+   os.path.dirname(exe) 下是否有形如纯版本号的目录（Edge 的 Application/157.0.4341.42）。
+   命中则记 source="sibling_dir" + warning。
+
+6. 全部失败 → version=None, source=None。
+   由调用方走 remember(..., version=None) 记成 app@unversioned 观察。
+```
+
+### 3.3 读子进程命令行：用 psutil，不需要 PEB
+
+跨进程读 `PEB` 需要 `NtQueryInformationProcess` + `ReadProcessMemory`。**实测不需要**：`psutil` 在**非管理员**下就能读到子进程命令行。
+
+实测结果（QQ 主进程 pid 15168，未提权）：
+
+```
+children:
+  pid 26212  type=?         version=9.9.22-40824   ← 命中
+  pid 14436  type=renderer  version=9.9.22-40824   ← 命中
+  pid 19684  type=gpu-process  version=-
+  pid 19556  type=utility      version=-
+  ...
+```
+
+实现：
+
+```python
+import psutil
+
+_VER = re.compile(r"[\\/]versions[\\/](\d+(?:\.\d+)+(?:-\d+)?)", re.I)
+
+def _child_version(pid: int) -> str | None:
+    try:
+        proc = psutil.Process(pid)
+        children = proc.children(recursive=False)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+    for child in children:
+        try:
+            for arg in child.cmdline():
+                m = _VER.search(arg)
+                if m:
+                    return m.group(1).split("-")[0]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
+```
+
+要点：
+
+- `psutil` 已在 venv（7.2.2），不引入新依赖
+- 只查**直接子进程**（`recursive=False`），够用且快
+- 单个子进程读失败就跳过，不整体失败
+- 命中的通常是 `--app-path=...` 那个参数，也可能是别的位置，所以对**每个参数**都匹配一次
+
+只有当 `psutil` 路径也失败时，才降级到第 3 级（sole_candidate）。
+
+### 3.4 两个已实测的陷阱
+
+**正则必须保留 `-(build)` 后缀。**
+
+```
+VER_EXACT = re.compile(r"\d+(?:\.\d+)+(?:-\d+)?")   # 对
+VER_SHORT = re.compile(r"\d+(?:\.\d+)+")            # 错，漏掉 9.9.22-40824
+```
+
+用错的后果：候选列表永远为空，第 3 级永远不命中。（这个错本次实测时自己踩过一次。）
+
+**`versions/` 目录里混有非版本文件。** 实测有 `channel.json`、`config.json`、`setting.json`。必须 `os.path.isdir()` + 完整正则双重过滤，否则会把 `setting.json` 当候选。
+
+### 3.5 返回字段
 
 ```python
 {"ok": True, "hwnd": hwnd, "pid": pid, "name": Path(exe).stem,
@@ -334,7 +433,20 @@ def _active_version(exe: Path, file_version: str | None) -> tuple[str | None, st
  "version_candidates": candidates, "warnings": []}
 ```
 
-进程已退出或无权读取 exe 返回结构化错误；exe 可读但无版本仍成功。`name` 用可执行文件 stem，ProductName 只展示。未知版本时 skill 改用 `recall(name)` 获取候选；新观测用 `remember(..., version=None)` 保存为应用级未定版本记录，不能把候选的版本信任位用于当前进程。
+- `version_candidates` 永远返回（诊断用），**但不参与 version 决策**，除非走第 3 级
+- `warnings` 记录降级原因，例如 `"sole candidate, not verified"`、`"cmdline unreadable: AccessDenied"`
+- 进程已退出或无权读 exe → 结构化错误；exe 可读但无版本 → 仍成功（`version=None`）
+
+### 3.6 skill 如何使用 source
+
+不要只给 agent 一个版本号，要让它知道可信度：
+
+| source | skill 的行为 |
+|---|---|
+| `path_segment` / `child_cmdline` | 直接 `recall("name@version")`，当作确定版本 |
+| `sole_candidate` | 用它查，但未命中时也要试 `recall("name")` 家族 |
+| `file_version` / `sibling_dir` | 先 `recall("name@version")`，未命中再 `recall("name")`；记录时写清 source |
+| `None` | 只用 `recall("name")`，新观测存 `app@unversioned` |
 
 ## 4. UIA：线程、pattern 与权限
 
@@ -961,6 +1073,9 @@ try {
 | 范围 | 必测行为 |
 |---|---|
 | 身份 | 路径含活动版本时取完整版本；只有候选目录不冒充活动版本；完整 FileVersion；无版本、权限拒绝、进程退出 |
+| 版本证据链 | 六级顺序可逐级 mock：任一级返回即停且 `source` 正确；`sole_candidate` 必须带 warning；候选多于一个时必须落到下一级而非乱选 |
+| 版本实测对照 | 对运行中的 QQ 断言 `source == "child_cmdline"` 且 `version == "9.9.22"`；对 Edge 断言 `source == "file_version"` 或 `sibling_dir"` 且版本以 `157.` 开头（两个应用必须走不同级） |
+| 正则 | `\d+(?:\.\d+)+(?:-\d+)?` 命中 `9.9.22-40824`；短正则 `\d+(?:\.\d+)+` 命中不了（写成断言防回退） |
 | 目录 | 版本名但非目录、setting.json、多个版本均不误判；验证 9.9.9/9.9.22/10.0.0 不做字符串最大值推断 |
 | 记录/schema | 临时目录读写 round-trip；中文 app、`../`、保留名均不越过根目录或碰撞；路径摘要与内容 key 互相校验；坏 YAML/日期被解析成对象/错误 bool/未知 schema/重复 id 拒绝覆盖 |
 | 未定版本 | version=None 保存到 app@unversioned 且可 recall；字符串 unversioned 不冒充版本；有效 rank=0，存储真信任位拒绝；approve/confirm_proven 的 true 返回 version unconfirmed；后续实际版本另存，旧观察保留 |
