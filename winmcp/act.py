@@ -496,8 +496,12 @@ def _keys(hwnd: int, keys: str, fg_before: int, start: float) -> dict:
         root = ControlFromHandle(hwnd)
         if root is not None:
             root.SetFocus()
-    except Exception:
-        pass
+    except Exception as error:
+        # Focus could not be placed deliberately; the keystrokes would go to
+        # whatever really holds it, so report that instead of sending them.
+        return _fail("target not focused",
+                     f"SetFocus on {win32.title(hwnd)!r} failed: "
+                     f"{type(error).__name__}: {error}; nothing was sent", fg_before)
     SendKeys(_normalise_keys(keys), interval=0.01, waitTime=0.2)
     return _done(hwnd, "key", keys, "cursor:keys", fg_before, start)
 

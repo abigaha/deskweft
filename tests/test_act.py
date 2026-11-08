@@ -263,6 +263,21 @@ class TestScrollAndKeys(ActCase):
             act.act(1, "key", text="Ctrl+s", allow_foreground=True)
         self.assertEqual(keys.call_args[0][0], "{Ctrl}{s}")
 
+    def test_keys_are_not_sent_when_focus_cannot_be_placed(self):
+        # The window is foreground and shown, but SetFocus fails. Keystrokes
+        # would go to whatever really holds focus, so nothing may be sent.
+        root = mock.Mock()
+        root.SetFocus.side_effect = RuntimeError("no focus")
+        with mock.patch.object(act.win32, "foreground", return_value=1), \
+             mock.patch.object(act.launch, "is_shown", return_value=True), \
+             mock.patch.object(act, "ControlFromHandle", return_value=root), \
+             mock.patch.object(act, "SendKeys") as keys:
+            result = act.act(1, "key", text="Enter", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "target not focused")
+        self.assertEqual(result["execution_state"], "not_started")
+        keys.assert_not_called()
+
     def test_foreground_permission_is_still_checked_first(self):
         with self.patch_read(detailed()) as read:
             result = act.act(1, "key", text="Enter")
