@@ -54,6 +54,12 @@ open_app(..., accessibility=true) 当前会追加三项：
 关闭旧实例，单实例程序可能忽略参数。需要重启时先保护未保存工作并核对已有授权，
 不能把自行杀进程当成普通探测步骤。QQ 9→132 等数字只作历史对照，现场记录真实值。
 
+open_app 隐藏的窗口用返回的 hidden_windows 里的 hwnd 定位；windows() 只列可见窗口。
+要把隐藏窗口显示出来只能用 reveal(hwnd)，而它**会**接管前台：调用前必须取得用户同意，
+且它是唯一应该主动改变用户屏幕的工具。归属未能确认（visibility_control=unconfirmed）
+时，候选列表里的窗口不是我们启动的，只能用 windows()/see() 继续定位，不要 reveal 一个
+不属于本次启动的窗口。
+
 ## 虚拟化列表的采集闭环
 
 先在两页上验证“读当前项→滚动/翻页→界面确实变化→读新增项”能工作，
@@ -115,7 +121,6 @@ open_app(..., accessibility=true) 当前会追加三项：
   wparam 高字是带符号滚动量。截图得到的坐标要先换算。
 
 ## 效果验证、超时与知识回写
-
 查询保存真实 result/text；写入用读回；点击用目标状态/反馈；滚动用位置和项目变化。
 call_completed、queued、returned 都不自动代表业务完成；provider 返回 False 时
 按具体方法语义处理。worker 或消息超时为 execution_state=unknown，先读目标现状，
