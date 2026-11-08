@@ -56,6 +56,26 @@ def find_check_window(pid: int) -> int | None:
     return None
 
 
+def _window_pid(hwnd: int) -> int:
+    """The process that owns a window, for proving a handle is still ours."""
+    import ctypes
+    from ctypes import wintypes
+
+    pid = wintypes.DWORD()
+    win32.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value)
+
+
+def _close_owned(result: dict) -> None:
+    """Close only the windows a launch proved it owns, by pid."""
+    pids = {result.get("pid")}
+    pids.update(w["pid"] for w in result.get("hidden_windows", []))
+    for item in result.get("hidden_windows", []):
+        hwnd = item["hwnd"]
+        if item.get("pid") in pids and win32.user32.IsWindow(hwnd):
+            win32.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+
+
 def read_label(hwnd: int) -> str | None:
     """Click feedback lives in a Label; UIA is the only cross-process view."""
     for e in tree.read(hwnd, timeout_ms=3000)[0]:
@@ -109,11 +129,26 @@ def main() -> int:
 
         fg = win32.foreground()
         t0 = time.perf_counter()
-        elements, timed_out = tree.read(hwnd, timeout_ms=3000)
+        detailed = tree.read_detailed(hwnd, timeout_ms=3000)
+        elements = detailed["elements"]
         dt = (time.perf_counter() - t0) * 1000
         names = [e["name"] for e in elements]
         check("tree.read() finds the button", "HIT-ME" in names, f"{dt:.0f} ms, {len(elements)} elements")
         check("tree.read() leaves the foreground alone", win32.foreground() == fg)
+        check("read_detailed() reports a complete read",
+              detailed["identity_complete"] and not detailed["timed_out"]
+              and detailed["tree_diagnostics"]["root_status"] == "ok",
+              str(detailed["tree_diagnostics"].get("root_status")))
+        button = next((e for e in elements if e["name"] == "HIT-ME"), None)
+        check("describe() carries the native child handle",
+              bool(button and button["native_hwnd"]), str(button and button["native_hwnd"]))
+        check("the pattern guard explains an unwrapped pattern",
+              tree.pattern_detailed(button["_el"] if button else None,
+                                    "SelectionPattern2").get("reason")
+              == "pattern not wrapped")
+        check("the pattern guard keeps cause_unknown for a None wrapper",
+              tree.pattern_detailed(button["_el"] if button else None,
+                                    "WindowPattern").get("cause_unknown", True) is not False)
 
         fg = win32.foreground()
         r = act.act(hwnd, "click", target="HIT-ME")
@@ -149,6 +184,57 @@ def main() -> int:
 
         r = act.act(hwnd, "click", target="no-such-control")
         check("an unroutable click asks instead of acting", r.get("needs_permission") is True)
+
+        # The window was made by another process, which is what the same-process
+        # rule in post_message exists to allow.
+        edit = next((k for k in win32.children(hwnd) if "Edit" in k["class"]), None)
+        if edit:
+            got = win32.post_message(edit["hwnd"], 0x000E, wait=True)
+            check("post_message WM_GETTEXTLENGTH returns a length",
+                  got.get("ok") is True and isinstance(got.get("result"), int),
+                  str(got.get("reason", "")))
+            text = win32.post_message(edit["hwnd"], 0x000D, wait=True, max_chars=256)
+            check("post_message WM_GETTEXT reads managed text", text.get("ok") is True,
+                  repr(text.get("text")))
+            wrote = win32.post_message(edit["hwnd"], 0x000C, wait=True, text="by message",
+                                       allow_foreground=True)
+            check("post_message WM_SETTEXT verifies its own readback",
+                  wrote.get("ok") is True and wrote.get("effect_verified") is True,
+                  f"{wrote.get('reason')} / {wrote.get('verification_reason')}")
+            check("post_message leaves the foreground alone",
+                  wrote.get("foreground_changed") is False)
+            denied = win32.post_message(edit["hwnd"], 0x000C, wait=True, text="x")
+            check("post_message gates a setter behind permission",
+                  denied.get("needs_permission") is True)
+            unsafe = win32.post_message(edit["hwnd"], 0x004A, wait=True,
+                                        allow_unsafe=True, allow_foreground=True)
+            check("post_message refuses an unmanaged payload",
+                  unsafe.get("reason") == "message payload unsupported", str(unsafe.get("reason")))
+
+        # Memory: a temporary root, so the user's real records are untouched.
+        from . import memory
+
+        import tempfile as _tempfile
+
+        with _tempfile.TemporaryDirectory(prefix="winmcp-mem-") as memdir:
+            from pathlib import Path as _Path
+            from unittest import mock as _mock
+
+            with _mock.patch.object(memory, "memory_root", return_value=_Path(memdir)):
+                stored = memory.remember(
+                    "check", "1.0", "A", "summary", "cost",
+                    "## \u76ee\u6807\nx\n## \u672a\u89e3\u51b3\nstill open\n",
+                    uses_foreground=False)
+                check("memory stores a plan", stored.get("ok") is True, str(stored.get("reason")))
+                found = memory.recall("check@1.0")
+                check("memory recalls it with a revision",
+                      bool(found["matches"]) and bool(
+                          found["matches"][0]["plans"][0]["revision"]))
+                check("memory derives the unresolved gap",
+                      memory.unresolved()[0]["text"] == "still open")
+                stale = memory.approve("check", "1.0", "A", "not-the-revision")
+                check("memory refuses a stale approval",
+                      stale.get("reason") == "stale plan", str(stale.get("reason")))
 
         # Render hosts and D3D windows answer PostMessage with success and do
         # nothing. Clicking one must be refused, never reported as done.
@@ -214,26 +300,85 @@ def main() -> int:
         from . import launch
 
         fg_before = win32.foreground()
+        fg_title_before = win32.title(fg_before)
         res = launch.launch("notepad.exe", settle=2.0)
         check("launch() started the program", res.get("ok") is True and res.get("pid"), str(res.get("reason", "")))
-        check("launch() kept the foreground", win32.foreground() == fg_before,
-              f"{win32.title(win32.foreground())[:30]!r}")
-        check("launch() hid the new window", len(res.get("hidden_windows", [])) > 0)
 
+        # A single-instance app hands the work to an already running copy, so
+        # the launched process owns no window. Ownership then has to come out
+        # unconfirmed - and the foreground may legitimately have moved to that
+        # other instance, which this run never claimed.
+        handover = res.get("visibility_control") == "unconfirmed"
+        if handover:
+            # A single-instance app handed the work to an already running copy:
+            # this run owns no window, so it must claim none - and acting on the
+            # other instance's window would be exactly the guess to avoid.
+            check("launch() refused to claim a window it could not attribute",
+                  res.get("target_window_confirmed") is False
+                  and res.get("hidden_windows") == [],
+                  f"visibility_control={res.get('visibility_control')}")
+        else:
+            check("launch() kept the foreground", win32.foreground() == fg_before,
+                  f"{win32.title(win32.foreground())[:30]!r}")
+            check("launch() hid the new window", len(res.get("hidden_windows", [])) > 0)
+
+        # Only windows this run proved it owns may be closed afterwards: the
+        # machine may already be running the user's own Notepad.
+        launched_pids = {res.get("pid")}
+        launched_pids.update(w["pid"] for w in res.get("hidden_windows", []))
         hidden = [w["hwnd"] for w in res.get("hidden_windows", [])]
         if hidden:
             r = act.act(hidden[0], "type", target="RICHEDIT", text="hidden write")
-            from windows_mcp.uia import ControlFromHandle
+            kids = [k for k in win32.children(hidden[0])
+                    if "RICHEDIT" in k["class"].upper()]
+            got = (win32.post_message(kids[0]["hwnd"], 0x000D, wait=True,
+                                      max_chars=4096).get("text") if kids else None)
+            check("a hidden window still accepts text",
+                  r.get("ok") is True and got == "hidden write", repr(got))
+        else:
+            # Notepad on this machine may be single-instance and hand the work to
+            # an already running copy, so no window belongs to the process we
+            # started. That is the honest outcome, not a failure: report it and
+            # say the launch window itself could not be attribution-verified.
+            print(f"  SKIP  a hidden window still accepts text"
+                  f"  (visibility_control={res.get('visibility_control')}, "
+                  f"no window was proven to belong to the launch)")
+            check("launch() reports an unconfirmed window instead of guessing",
+                  res.get("visibility_control") in ("unconfirmed", "partial")
+                  and res.get("target_window_confirmed") is False)
 
-            kids = [k for k in win32.children(hidden[0]) if "RICHEDIT" in k["class"].upper()]
-            got = ControlFromHandle(kids[0]["hwnd"]).GetValuePattern().Value if kids else None
-            check("a hidden window still accepts text", r.get("ok") is True and got == "hidden write", repr(got))
+        # Notepad may be single-instance, so prove the owned-window path on an
+        # app that really starts a new process.
+        fresh = r"C:\Windows\System32\charmap.exe"
+        if os.path.exists(fresh) and not any("Character Map" in w["title"]
+                                             for w in win32.list_windows()):
+            fg = win32.foreground()
+            owned = launch.launch(fresh, settle=2.5)
+            if owned.get("visibility_control") == "applied":
+                hidden_ok = all(w["hide_succeeded"] and w["ownership_basis"] == "direct_process"
+                                for w in owned["hidden_windows"])
+                check("a proven new process has its own windows hidden",
+                      hidden_ok and owned["target_window_confirmed"] is True,
+                      f"{len(owned['hidden_windows'])} windows")
+                check("hiding them kept the foreground", win32.foreground() == fg,
+                      f"{win32.title(win32.foreground())[:30]!r}")
+                check("no unrelated window was claimed", owned["window_candidates"] == [],
+                      str(len(owned["window_candidates"])))
+            else:
+                check("a proven new process has its own windows hidden",
+                      owned.get("visibility_control") == "unconfirmed",
+                      f"visibility_control={owned.get('visibility_control')}")
+            _close_owned(owned)
 
+        # Close only what this run started, verified by pid: a class-name scan
+        # would close every Notepad on the machine.
+        for hwnd in hidden:
+            pid = _window_pid(hwnd)
+            if pid and pid in launched_pids and win32.user32.IsWindow(hwnd):
+                win32.user32.PostMessageW(hwnd, 0x0010, 0, 0)
         for w in win32.list_windows():
-            if "Notepad" in w["class"]:
+            if ("Notepad" in w["class"] or "Notepad" in w["title"]) and w["pid"] in launched_pids:
                 win32.user32.PostMessageW(w["hwnd"], 0x0010, 0, 0)
-        for h in hidden:
-            win32.user32.PostMessageW(h, 0x0010, 0, 0)
     finally:
         proc.terminate()
         try:

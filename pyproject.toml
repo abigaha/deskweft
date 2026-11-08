@@ -3,7 +3,7 @@ name = "winmcp"
 version = "0.1.0"
 description = "Window-targeted desktop control that never takes the foreground"
 requires-python = ">=3.14"
-dependencies = ["windows-mcp==0.8.8"]
+dependencies = ["windows-mcp==0.8.8", "PyYAML>=6,<7", "psutil>=7,<8"]
 
 [project.scripts]
 winmcp = "winmcp.server:main"
