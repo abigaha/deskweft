@@ -1,0 +1,548 @@
+"""act.py: existing actions must refuse uncertain targets; invoke_pattern opens UIA.
+
+Fake elements and patched Win32 only. Nothing here sends a real message, moves
+the cursor or steals the foreground.
+"""
+
+from __future__ import annotations
+
+import threading
+import unittest
+from unittest import mock
+
+from winmcp import act, tree
+from test_tree import FakeElement, FakeRect
+
+
+def detailed(*elements, **overrides):
+    """A read_detailed() result built from fake elements."""
+    base = {"elements": [_as_row(e) for e in elements],
+            "timed_out": False, "limit_reached": False, "identity_complete": True,
+            "tree_diagnostics": {"root_status": "ok", "filtered_anonymous": 0,
+                                 "filtered_offscreen": 0, "warnings": [],
+                                 "warnings_truncated": False}}
+    base.update(overrides)
+    return base
+
+
+def _as_row(element):
+    """The plain-data row read_detailed() emits, with the live element beside it."""
+    if isinstance(element, dict):
+        return element
+    box = element.BoundingRectangle
+    return {"control_type": element.ControlTypeName, "automation_id": element.AutomationId,
+            "name": element.Name, "nth": 0, "patterns": [], "native_hwnd": None,
+            "depth": 0,
+            "rect": None if box is None else [box.left, box.top,
+                                              box.right - box.left, box.bottom - box.top],
+            "_el": element}
+
+
+def el(name="", automation_id="", patterns=None, **kwargs):
+    return FakeElement(name=name, automation_id=automation_id, patterns=patterns or {},
+                       **kwargs)
+
+
+def _control(name="one", handle=1):
+    """A real Control instance with plain attributes, as the dependency exposes them."""
+    from windows_mcp.uia.controls import Control
+    from windows_mcp.uia.patterns import TextRange
+    import unittest.mock as mock
+
+    control = Control.__new__(Control)
+    control.__dict__.update({
+        "Name": name, "AutomationId": f"id{handle}", "ControlTypeName": "ListItemControl",
+        "BoundingRectangle": FakeRect(), "NativeWindowHandle": handle, "_patterns": {},
+        "_children": [],
+    })
+    return control
+
+
+class ActCase(unittest.TestCase):
+    def setUp(self):
+        for name, value in (("title", "Window"), ("foreground", 1)):
+            patch = mock.patch.object(act.win32, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        for target, value in ((act.win32.user32, "IsWindow"),):
+            patch = mock.patch.object(target, value, return_value=1)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def patch_children(self, kids):
+        return mock.patch.object(act.win32, "children", return_value=kids)
+
+    def patch_read(self, result):
+        return mock.patch.object(act.tree, "read_detailed", return_value=result)
+
+    def patch_activate(self, ok=True):
+        return mock.patch.object(act.win32, "activate", return_value=ok)
+
+
+class TestChildResolution(ActCase):
+    def test_two_exact_matches_are_ambiguous_and_send_nothing(self):
+        kids = [{"hwnd": 1, "class": "Button", "text": "OK", "rect": [0, 0, 10, 10]},
+                {"hwnd": 2, "class": "Button", "text": "OK", "rect": [0, 0, 10, 10]}]
+        with self.patch_children(kids), \
+             mock.patch.object(act.win32.user32, "PostMessageW") as post:
+            result = act.act(1, "click", target="OK")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "ambiguous target")
+        self.assertEqual(result["execution_state"], "not_started")
+        post.assert_not_called()
+
+    def test_empty_target_needs_exactly_one_native_candidate(self):
+        kids = [{"hwnd": 1, "class": "Button", "text": "A", "rect": [0, 0, 9, 9]},
+                {"hwnd": 2, "class": "Button", "text": "B", "rect": [0, 0, 9, 9]}]
+        with self.patch_children(kids), self.patch_read(detailed()), \
+             mock.patch.object(act.win32.user32, "PostMessageW") as post:
+            result = act.act(1, "click", target="")
+        self.assertEqual(result["reason"], "target required")
+        post.assert_not_called()
+
+    def test_click_never_falls_back_to_the_window_centre(self):
+        with self.patch_children([]), self.patch_read(detailed()), \
+             self.patch_activate(True), \
+             mock.patch.object(act, "SetCursorPos") as cursor, \
+             mock.patch.object(act, "Click") as click:
+            result = act.act(1, "click", target="ghost", allow_foreground=True)
+        self.assertEqual(result["reason"], "no such control")
+        cursor.assert_not_called()
+        click.assert_not_called()
+
+    def test_incomplete_tree_refuses_before_activation(self):
+        with self.patch_children([]), \
+             self.patch_read(detailed(el(name="ghost"), timed_out=True)), \
+             self.patch_activate(True) as activate, \
+             mock.patch.object(act, "Click") as click:
+            result = act.act(1, "click", target="ghost", allow_foreground=True)
+        self.assertEqual(result["reason"], "tree incomplete")
+        activate.assert_not_called()
+        click.assert_not_called()
+
+    def test_ambiguous_uia_target_refuses(self):
+        elements = detailed(el(name="Save"), el(name="Save", automation_id="b"))
+        with self.patch_children([]), self.patch_read(elements), \
+             self.patch_activate(True) as activate:
+            result = act.act(1, "click", target="Save", allow_foreground=True)
+        self.assertEqual(result["reason"], "ambiguous target")
+        activate.assert_not_called()
+
+    def test_unique_native_click_reports_queued_not_verified(self):
+        kids = [{"hwnd": 5, "class": "Button", "text": "OK", "rect": [0, 0, 9, 9]}]
+        with self.patch_children(kids), \
+             mock.patch.object(act.win32.user32, "PostMessageW", return_value=1) as post:
+            result = act.act(1, "click", target="OK")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["delivery"], "queued")
+        self.assertFalse(result["effect_verified"])
+        self.assertEqual(post.call_args[0][0], 5)
+
+    def test_rejected_post_message_is_not_success(self):
+        kids = [{"hwnd": 5, "class": "Button", "text": "OK", "rect": [0, 0, 9, 9]}]
+        with self.patch_children(kids), \
+             mock.patch.object(act.win32.user32, "PostMessageW", return_value=0):
+            result = act.act(1, "click", target="OK")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "message delivery failed")
+
+
+class TestTyping(ActCase):
+    def test_native_type_uses_the_managed_helper_and_verifies(self):
+        kids = [{"hwnd": 5, "class": "Edit", "text": "", "rect": [0, 0, 9, 9]}]
+        with self.patch_children(kids), \
+             mock.patch.object(act.win32, "_write_text",
+                               return_value={"ok": True, "effect_verified": True,
+                                             "delivery": "returned", "result": 1}):
+            result = act.act(1, "type", target="", text="hello")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["route"], "win32:WM_SETTEXT")
+
+    def test_value_none_is_unverifiable_not_a_definite_failure(self):
+        root = el(name="edit", automation_id="e")
+        with self.patch_children([]), \
+             self.patch_read(detailed(root)), self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}):
+            result = act.act(1, "type", target="e", text="x", allow_foreground=True)
+        self.assertFalse(result["effect_verified"])
+        self.assertEqual(result.get("verification_reason"), "readback unavailable")
+
+    def test_readback_mismatch_is_an_explicit_failure(self):
+        root = el(name="edit", automation_id="e")
+        value = mock.Mock()
+        value.SetValue.return_value = True
+        value.Value = "other"
+        with self.patch_children([]), \
+             self.patch_read(detailed(root)), self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": value,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = act.act(1, "type", target="e", text="wanted", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "text readback mismatch")
+
+    def test_typing_never_reaches_the_window_centre(self):
+        root = el(name="edit", automation_id="e", rect=FakeRect(0, 0, 0, 0))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable"}), \
+             mock.patch.object(act, "SendKeys") as keys:
+            result = act.act(1, "type", target="e", text="x", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "control has no clickable area")
+        keys.assert_not_called()
+
+
+class TestScrollAndKeys(ActCase):
+    def test_scroll_uses_the_documented_enum_pair(self):
+        sp = mock.Mock()
+        sp.VerticalScrollPercent = 0
+        root = el(name="list", automation_id="l")
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": sp,
+                                             "canonical": "ScrollPattern", "pattern_id": 10004}):
+            act.act(1, "scroll", target="l", text="down", allow_foreground=True)
+        sp.Scroll.assert_called_once_with(act.ScrollAmount.NoAmount,
+                                         act.ScrollAmount.LargeIncrement)
+
+    def test_scroll_up_uses_large_decrement(self):
+        sp = mock.Mock()
+        sp.VerticalScrollPercent = 50
+        root = el(name="list", automation_id="l")
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": sp,
+                                             "canonical": "ScrollPattern", "pattern_id": 10004}):
+            act.act(1, "scroll", target="l", text="up", allow_foreground=True)
+        sp.Scroll.assert_called_once_with(act.ScrollAmount.NoAmount,
+                                          act.ScrollAmount.LargeDecrement)
+
+    def test_scroll_false_is_not_success(self):
+        sp = mock.Mock()
+        sp.VerticalScrollPercent = 0
+        sp.Scroll.return_value = False
+        root = el(name="list", automation_id="l")
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": sp,
+                                             "canonical": "ScrollPattern", "pattern_id": 10004}):
+            result = act.act(1, "scroll", target="l", text="down", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "provider reported false")
+
+    def test_scroll_with_a_missing_target_does_not_fall_back_to_the_root(self):
+        root = el(name="list")
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act, "ControlFromHandle") as handle:
+            result = act.act(1, "scroll", target="ghost", allow_foreground=True)
+        self.assertEqual(result["reason"], "no such control")
+        handle.assert_not_called()
+
+    def test_real_keys_need_a_verified_foreground(self):
+        with mock.patch.object(act.win32, "foreground", return_value=99), \
+             mock.patch.object(act.launch, "is_shown", return_value=True), \
+             mock.patch.object(act, "SendKeys") as keys:
+            result = act.act(1, "key", text="Ctrl+s", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "target not focused")
+        keys.assert_not_called()
+
+    def test_key_notation_is_normalised(self):
+        with mock.patch.object(act.win32, "foreground", return_value=1), \
+             mock.patch.object(act.launch, "is_shown", return_value=True), \
+             mock.patch.object(act, "ControlFromHandle", return_value=None), \
+             mock.patch.object(act, "SendKeys") as keys:
+            act.act(1, "key", text="Ctrl+s", allow_foreground=True)
+        self.assertEqual(keys.call_args[0][0], "{Ctrl}{s}")
+
+    def test_foreground_permission_is_still_checked_first(self):
+        with self.patch_read(detailed()) as read:
+            result = act.act(1, "key", text="Enter")
+        self.assertTrue(result["needs_permission"])
+        read.assert_not_called()
+
+
+class TestInvokePattern(ActCase):
+    def setUp(self):
+        super().setUp()
+        self.root = el(name="root")
+        self.read = mock.patch.object(act.tree, "read_detailed",
+                                      return_value=detailed(self.root))
+        self.handle = mock.patch.object(act, "ControlFromHandle", return_value=self.root)
+        for patch in (self.read, self.handle):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.patch_read = None
+
+    def invoke(self, **kwargs):
+        params = dict(pattern="ValuePattern", target="", method="Value", args=None)
+        params.update(kwargs)
+        return act.invoke_pattern(1, **params)
+
+    def value_pattern(self, value="text", attr=True):
+        pattern = mock.Mock()
+        pattern.Value = value
+        return pattern
+
+    def test_empty_target_uses_the_root_window(self):
+        pattern = self.value_pattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="Value", args=[])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"], "text")
+        self.assertEqual(result["route"], "uia:ValuePattern")
+        self.assertFalse(result["effect_verified"])
+        self.assertTrue(result["call_completed"])
+
+    def test_unknown_or_unwrapped_pattern_is_reported_as_is(self):
+        for reason in ("unknown pattern", "pattern not wrapped", "provider error",
+                       "pattern unavailable"):
+            with mock.patch.object(act.tree, "pattern_detailed",
+                                   return_value={"ok": False, "reason": reason,
+                                                 "detail": "x", "pattern_id": 10034}):
+                result = self.invoke()
+            self.assertFalse(result["ok"], reason)
+            self.assertEqual(result["reason"], reason)
+            self.assertEqual(result["execution_state"], "not_started")
+
+    def test_property_chain_reaches_a_text_range_and_projects_it(self):
+        from windows_mcp.uia.patterns import TextPattern, TextRange
+
+        text_range = TextRange.__new__(TextRange)
+        text_range.GetText = lambda cap: "hello world"[:cap]
+        class _FakeTextPattern(TextPattern):
+            DocumentRange = property(lambda self: text_range)
+
+        text_pattern = _FakeTextPattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": text_pattern,
+                                             "canonical": "TextPattern", "pattern_id": 10014}):
+            result = self.invoke(pattern="TextPattern", method="DocumentRange.GetText",
+                                 args=[4096])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"]["text"], "hello world")
+
+    def test_read_only_queries_are_allowed_in_the_background(self):
+        pattern = self.value_pattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="Value", allow_foreground=False)
+        self.assertTrue(result["ok"], result)
+
+    def test_writer_members_need_permission_and_never_reach_the_provider(self):
+        pattern = mock.Mock()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}) as get:
+            result = self.invoke(method="SetValue", args=["x"])
+        self.assertTrue(result.get("needs_permission"), result)
+        get.assert_not_called()
+        pattern.SetValue.assert_not_called()
+
+    def test_get_prefix_is_not_trusted_as_read_only(self):
+        pattern = mock.Mock()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="SomethingElse", args=[])
+        self.assertTrue(result.get("needs_permission"), result)
+        pattern.SomethingElse.assert_not_called()
+
+    def test_private_and_expression_members_are_refused(self):
+        for method in ("_private", "Value.__class__", "Value[0]", "Value()", "a b"):
+            with mock.patch.object(act.tree, "pattern_detailed") as get:
+                result = self.invoke(method=method)
+            self.assertEqual(result["reason"], "invalid arguments", method)
+            get.assert_not_called()
+
+    def test_raw_element_fields_cannot_be_used_as_a_chain(self):
+        for method in ("pattern", "Element", "textRange", "pattern.CurrentValue"):
+            with mock.patch.object(act.tree, "pattern_detailed") as get:
+                result = self.invoke(method=method)
+            self.assertIn(result["reason"], ("invalid arguments", "member unavailable"),
+                          method)
+            get.assert_not_called()
+
+    def test_action_false_is_a_failure_that_completed(self):
+        pattern = mock.Mock()
+        pattern.Expand.return_value = False
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ExpandCollapsePattern",
+                                             "pattern_id": 10005}):
+            result = self.invoke(pattern="ExpandCollapsePattern", method="Expand",
+                                 args=[], allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "provider reported false")
+        self.assertTrue(result["call_completed"])
+        self.assertEqual(result["execution_state"], "completed")
+
+    def test_query_returning_false_is_a_legitimate_value(self):
+        pattern = mock.Mock()
+        pattern.IsSelected = False
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "SelectionItemPattern",
+                                             "pattern_id": 10010}):
+            result = self.invoke(pattern="SelectionItemPattern", method="IsSelected", args=[])
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["result"])
+
+    def test_control_list_is_projected_without_com_leaking(self):
+        import windows_mcp.uia.patterns as patterns
+
+        # Real Control objects are what SelectionPattern returns; a fake cannot
+        # stand in because _TRUSTED checks the dependency's actual classes.
+        items = [act.ControlFromHandle.__self__ if False else _control("one", 1),
+                 _control("two", 2)]
+        pattern = patterns.SelectionPattern.__new__(patterns.SelectionPattern)
+        pattern.GetSelection = lambda: items
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "SelectionPattern", "pattern_id": 10001}):
+            result = self.invoke(pattern="SelectionPattern", method="GetSelection", args=[])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(result["result"]), 2)
+        self.assertNotIn("_el", result["result"][0])
+
+    def test_unknown_object_is_result_unsupported_not_silent_success(self):
+        import windows_mcp.uia.patterns as patterns
+
+        pattern = patterns.ValuePattern.__new__(patterns.ValuePattern)
+        # A declared public member whose value has no projection.
+        pattern.Weird = object()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="Weird", args=[], allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "result unsupported")
+        self.assertEqual(result["execution_state"], "completed")
+        self.assertFalse(result["retry_safe"])
+
+    def test_arguments_are_limited_to_json_scalars(self):
+        # Authorization comes first: SetValue is off the read-only table, so the
+        # call needs allow_foreground before its arguments are even considered.
+        for args in ([{"a": 1}], [float("nan")], [float("inf")], [None], [[1]]):
+            result = self.invoke(method="SetValue", args=args, allow_foreground=True)
+            self.assertEqual(result["reason"], "invalid arguments", args)
+        # Plain scalars are legal arguments.
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "unknown pattern"}):
+            self.assertNotEqual(
+                self.invoke(method="SetValue", args=["x"], allow_foreground=True)["reason"],
+                "invalid arguments")
+
+    def test_args_none_means_no_arguments(self):
+        pattern = self.value_pattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="Value", args=None)
+        self.assertTrue(result["ok"], result)
+
+    def test_a_property_rejects_arguments(self):
+        pattern = self.value_pattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": pattern,
+                                             "canonical": "ValuePattern", "pattern_id": 10002}):
+            result = self.invoke(method="Value", args=[1])
+        self.assertEqual(result["reason"], "invalid arguments")
+
+    def test_target_resolution_is_exact_only(self):
+        one = el(name="Save As")
+        with mock.patch.object(act.tree, "read_detailed", return_value=detailed(one)):
+            result = self.invoke(target="Save", method="Value")
+        self.assertEqual(result["reason"], "no such control")
+
+    def test_ambiguous_or_incomplete_targets_refuse(self):
+        with mock.patch.object(act.tree, "read_detailed",
+                               return_value=detailed(el(name="x"), el(name="x", automation_id="2"))):
+            self.assertEqual(self.invoke(target="x")["reason"], "ambiguous target")
+        with mock.patch.object(act.tree, "read_detailed",
+                               return_value=detailed(el(name="x"), limit_reached=True)):
+            self.assertEqual(self.invoke(target="x")["reason"], "tree incomplete")
+
+    def test_timeout_and_hwnd_validation(self):
+        for bad in (0, -1, True, "1"):
+            result = act.invoke_pattern(bad, "ValuePattern", "", "Value", [])
+            self.assertEqual(result["reason"], "invalid hwnd", bad)
+        for bad in (0, 30001, True):
+            result = self.invoke(timeout_ms=bad)
+            self.assertEqual(result["reason"], "invalid arguments", bad)
+        self.assertEqual(self.invoke(pattern="")["reason"], "invalid arguments")
+        self.assertEqual(self.invoke(method="")["reason"], "invalid arguments")
+
+    def test_gettext_cap_is_bounded(self):
+        for bad in (-1, 0, 6002):
+            with mock.patch.object(act.tree, "pattern_detailed") as get:
+                result = self.invoke(pattern="TextPattern", method="DocumentRange.GetText",
+                                     args=[bad])
+            self.assertEqual(result["reason"], "invalid arguments", bad)
+            get.assert_not_called()
+
+    def test_gettext_at_the_cap_is_possibly_truncated(self):
+        from windows_mcp.uia.patterns import TextPattern, TextRange
+
+        text_range = TextRange.__new__(TextRange)
+        text_range.GetText = lambda cap: "x" * min(cap, 4097)
+        class _FakeTextPattern(TextPattern):
+            DocumentRange = property(lambda self: text_range)
+
+        text_pattern = _FakeTextPattern()
+        with mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": text_pattern,
+                                             "canonical": "TextPattern", "pattern_id": 10014}):
+            result = self.invoke(pattern="TextPattern", method="DocumentRange.GetText",
+                                 args=[4096])
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["result"]["possibly_truncated"])
+
+
+class TestProjection(ActCase):
+    def test_projecticts_scalars_without_stringifying(self):
+        budget = act._Budget()
+        self.assertEqual(act._plain_result(True, budget), True)
+        self.assertEqual(act._plain_result(7, budget), 7)
+        self.assertEqual(act._plain_result(1.5, budget), 1.5)
+        self.assertEqual(act._plain_result("s", budget), "s")
+        self.assertIsNone(act._plain_result(None, budget))
+
+    def test_large_lists_are_truncated_and_flagged(self):
+        budget = act._Budget()
+        value = list(range(500))
+        result = act._plain_result(value, budget)
+        self.assertEqual(len(result), 100)
+        self.assertTrue(budget.truncated)
+
+    def test_long_strings_are_bounded(self):
+        budget = act._Budget()
+        result = act._plain_result("x" * 20000, budget)
+        self.assertLessEqual(len(result), act.MAX_TEXT)
+        self.assertTrue(budget.truncated)
+
+    def test_depth_is_bounded(self):
+        budget = act._Budget()
+        deep = [[[[[[1]]]]]]
+        act._plain_result(deep, budget)
+        self.assertTrue(budget.truncated)
+
+    def test_non_string_keys_are_not_projected(self):
+        budget = act._Budget()
+        with self.assertRaises(act.Unsupported):
+            act._plain_result({1: "x"}, budget)
+
+
+if __name__ == "__main__":
+    unittest.main()
