@@ -162,8 +162,9 @@ def _make_dispatch() -> dict:
 
 
 def _valid_see(hwnd, with_tree, timeout_ms, max_elements) -> str | None:
-    if isinstance(hwnd, bool) or not isinstance(hwnd, int) or not 0 < hwnd < 0x10000000:
-        return "hwnd must be a positive window handle"
+    if (isinstance(hwnd, bool) or not isinstance(hwnd, int)
+            or not 0 < hwnd < 0x10000000 or hwnd == 0xFFFF):
+        return "hwnd must be one positive window handle, not a broadcast or sentinel"
     if not isinstance(with_tree, bool):
         return "with_tree must be a bool"
     for name, value, high in (("timeout_ms", timeout_ms, 30000),

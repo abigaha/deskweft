@@ -87,6 +87,11 @@ open_app(..., accessibility=true) 当前会追加三项：
   等可能改状态或夺焦的动作）需要先取得 allow_foreground 授权。
 - **不要用 Get 前缀判断安全**：表是显式维护的。某个应用的只读 getter 实测会夺焦时，
   在 memory 里把该路线记成 uses_foreground=true，不要继续当后台方案复用。
+- 现状已知的成本：`LegacyIAccessiblePattern` 的 `Name`/`Description`/`Value` 是纯读取，
+  但不在只读表内，因此需要 allow_foreground 才能调用（实测：同一窗口内 `Name` 授权后
+  返回字符串、`Description` 返回空串）。这是表覆盖面的缺口，不是应用问题；遇到时
+  按授权流程走，并把“本应用该用哪个只读接口替代”写进 memory 的未解决/未试方向。
+  是否把 Legacy 读取加入只读表属于契约变更，需要同时补测试与副作用证据，不能顺手放宽。
 - 定位是纯精确的：AutomationId 或 name 必须唯一命中且树完整，否则
   `no such control` / `ambiguous target` / `tree incomplete`，不动作。
 - 返回值已投影成普通数据：TextRange 变成有界文本（`possibly_truncated` 表示已到 API
