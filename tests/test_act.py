@@ -146,6 +146,58 @@ class TestChildResolution(ActCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "message delivery failed")
 
+    def test_a_provider_error_stops_the_chain_instead_of_trying_another_route(self):
+        """A getter that raises is a real failure, not "this pattern is absent".
+
+        Falling through to InvokePattern would perform a different side-effecting
+        call the caller never asked for - and on Chromium that route takes the
+        foreground.
+        """
+        invoke = mock.Mock()
+        with self.patch_children([]), self.patch_read(detailed(el(name="b"))), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=[
+                                   {"ok": False, "reason": "provider error",
+                                    "detail": "COMError: legacy broke"},
+                                   {"ok": True, "value": invoke,
+                                    "canonical": "InvokePattern", "pattern_id": 10000}]):
+            result = act.act(1, "click", target="b", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "provider error")
+        self.assertIn("legacy broke", result["detail"])
+        invoke.Invoke.assert_not_called()
+
+    def test_an_absent_pattern_still_moves_to_the_next_route(self):
+        invoke = mock.Mock()
+        with self.patch_children([]), self.patch_read(detailed(el(name="b"))), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=[
+                                   {"ok": False, "reason": "pattern unavailable",
+                                    "cause_unknown": True},
+                                   {"ok": True, "value": invoke,
+                                    "canonical": "InvokePattern", "pattern_id": 10000}]):
+            result = act.act(1, "click", target="b", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        invoke.Invoke.assert_called_once()
+
+    def test_a_called_route_that_raises_is_not_replaced_by_another(self):
+        legacy = mock.Mock()
+        legacy.DoDefaultAction.side_effect = RuntimeError("provider exploded")
+        invoke = mock.Mock()
+        with self.patch_children([]), self.patch_read(detailed(el(name="b"))), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=[
+                                   {"ok": True, "value": legacy,
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018},
+                                   {"ok": True, "value": invoke,
+                                    "canonical": "InvokePattern", "pattern_id": 10000}]):
+            result = act.act(1, "click", target="b", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "provider error")
+        self.assertEqual(result["execution_state"], "unknown")
+        invoke.Invoke.assert_not_called()
+
 
 class TestTyping(ActCase):
     def test_native_type_uses_the_managed_helper_and_verifies(self):

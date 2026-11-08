@@ -341,10 +341,12 @@ def _click_uia(hwnd: int, hit: dict, el, target: str, fg_before: int, start: flo
     ):
         result = tree.pattern_detailed(el, name)
         if not result["ok"]:
-            if result["reason"] in ("provider error", "pattern unavailable") \
-                    and not result.get("cause_unknown"):
-                continue
-            continue  # not present here: try the next documented route
+            if result["reason"] == "provider error":
+                # The getter itself failed. That is evidence about this provider,
+                # not proof the pattern is absent, and quietly trying another
+                # side-effecting route would perform a call nobody authorised.
+                return _fail("provider error", result["detail"], fg_before)
+            continue  # absent or unwrapped here: the next documented route may exist
         member = getattr(result["value"], call, None)
         if not callable(member):
             continue

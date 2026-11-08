@@ -279,9 +279,88 @@ class TestStartup(WorkerCase):
         self.assertEqual(result["reason"], "worker unavailable")
         spawn.assert_not_called()
 
+    def test_a_timeout_before_transport_ready_is_sticky(self):
+        """No transport_ready arrived: the standard-library resource handoff is
+        unproven, so rebuilding risks leaking it. Unavailable stays."""
+        with mock.patch.object(uia_worker, "_spawn",
+                               side_effect=uia_worker.StartupFailure(
+                                   "IPC deadline exceeded", transport_ready=False)):
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["reason"], "worker unavailable")
+        with mock.patch.object(uia_worker, "_spawn") as spawn:
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertEqual(second["reason"], "worker unavailable")
+        spawn.assert_not_called()
+
+    def test_a_slow_start_after_transport_ready_may_rebuild(self):
+        """transport_ready arrived and the child was reaped, so the handoff
+        completed: a slow initialization must not disable every desktop tool."""
+        calls = {"n": 0}
+
+        def spawn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise uia_worker.StartupFailure("IPC deadline exceeded",
+                                                transport_ready=True)
+            raise uia_worker.StartupFailure("still broken", transport_ready=True)
+
+        with mock.patch.object(uia_worker, "_spawn", side_effect=spawn):
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["reason"], "worker init timeout")
+        self.assertEqual(calls["n"], 2, "a retry after transport_ready must be attempted")
+        self.assertFalse(second["ok"])
+
+    def test_an_unreadable_transport_reply_is_not_sticky(self):
+        """transport_ready did arrive, so the handoff is proven; the next call
+        may rebuild rather than lose every desktop tool for the service's life."""
+        with mock.patch.object(uia_worker, "_spawn",
+                               side_effect=uia_worker.StartupFailure(
+                                   "worker rejected the transport",
+                                   transport_ready=True)):
+            result = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["execution_state"], "not_started")
+        self.assertTrue(result["retry_safe"])
+        self.assertIsNone(uia_worker._unavailable)
+
     def test_close_is_idempotent(self):
         uia_worker.close()
         uia_worker.close()
+
+    def test_an_undead_worker_is_kept_and_makes_the_service_sticky(self):
+        """A worker that survives terminate and kill must not be replaced.
+
+        Rebuilding it would leak one wedged child per request, so the honest
+        answer is a sticky failure that names the real condition.
+        """
+        undead = mock.Mock()
+        undead.is_alive.return_value = True
+
+        def behaviour(channel):
+            uia_worker._recv_frame(channel, None)  # swallow: force a timeout
+            time.sleep(5)
+
+        parent, _child, _thread = self.start_fake(ready_worker(behaviour))
+        worker = mock.Mock()
+        worker.is_alive.return_value = True
+        uia_worker._worker = {"process": worker, "channel": parent,
+                              "started": True, "transport_ready": True,
+                              "start_ms": 1.0, "startup_ms": 2.0}
+        for _ in range(2):
+            uia_worker._recv_frame(parent, time.monotonic() + 2)
+        with mock.patch.object(uia_worker, "_reap", return_value=(1.0, True)) as reap, \
+             mock.patch.object(uia_worker, "_spawn") as spawn:
+            first = uia_worker.call("see", {"hwnd": 1}, 200)
+            second = uia_worker.call("see", {"hwnd": 1}, 200)
+        self.assertFalse(first["ok"])
+        self.assertTrue(reap.called)
+        self.assertIsNotNone(uia_worker._unavailable, "an unreapable worker must be sticky")
+        self.assertEqual(second["reason"], "worker unavailable")
+        spawn.assert_not_called()
+        self.assertIs(uia_worker._worker, None)
 
 
 class TestImages(unittest.TestCase):
@@ -301,7 +380,23 @@ class TestImages(unittest.TestCase):
         self.assertEqual(decoded["meta"]["image_unavailable"], "IPC image size limit")
         self.assertTrue(decoded["meta"]["ok"])
 
-    def test_metadata_over_the_frame_limit_is_a_named_error(self):
+    def test_a_combination_that_exceeds_the_frame_drops_the_image_first(self):
+        """The tree is the expensive part; an image is replaceable by re-reading.
+        Losing the whole result because meta+image is a byte over the limit would
+        throw away work the caller asked for and cannot easily repeat."""
+        big_meta = {"ok": True, "elements": [{"name": "n" * 200} for _ in range(2000)]}
+        image = b"x" * 200_000
+        # Metadata alone is ~428 KB; with the base64 image it is ~695 KB, so a
+        # 600 KB frame fits the tree and not the pair.
+        with mock.patch.object(uia_worker, "MAX_FRAME_BYTES", 600_000), \
+             mock.patch.object(uia_worker, "MAX_IMAGE_BYTES", 10_000_000):
+            encoded = uia_worker._encode_result({"meta": big_meta, "png": image})
+        decoded = uia_worker._decode_result(encoded)
+        self.assertIsNone(decoded["png"], "the image should have been dropped")
+        self.assertEqual(decoded["meta"]["image_unavailable"], "IPC image size limit")
+        self.assertEqual(len(decoded["meta"]["elements"]), 2000, "the tree must survive")
+
+    def test_metadata_alone_over_the_limit_is_a_named_error(self):
         with mock.patch.object(uia_worker, "MAX_FRAME_BYTES", 200):
             with self.assertRaises(uia_worker.ResponseTooLarge):
                 uia_worker._encode_result({"meta": {"blob": "y" * 1000}, "png": None})

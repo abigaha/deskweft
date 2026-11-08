@@ -117,8 +117,11 @@ open_app 隐藏的窗口用返回的 hidden_windows 里的 hwnd 定位；windows
   `readback unavailable`/`budget exhausted` 只说明本次无法验证。
 - 广播句柄、`WM_COPYDATA`、`WM_DROPFILES`、同进程窗口一律拒绝；未知标量需要
   allow_unsafe + 前台授权，且调用方须自己确认该消息不携带指针或句柄。
-- 鼠标消息的参数是 Win32 约定：按钮消息 lparam 用客户区坐标，滚轮 lparam 用屏幕坐标、
-  wparam 高字是带符号滚动量。截图得到的坐标要先换算。
+- 权限按**效果**判断，不按消息是否带指针判断：`WM_LBUTTONDOWN/UP`、`WM_MOUSEWHEEL`、
+  `WM_KEYDOWN/UP/CHAR`、`BM_CLICK`、`WM_SETTEXT` 和未知标量都需要 allow_foreground；
+  只有 `WM_NULL`、`WM_GETTEXTLENGTH`、`BM_GETCHECK`、`CB_GETCURSEL`、`LB_GETCURSEL`
+  和托管的 `WM_GETTEXT` 能在后台执行。鼠标消息的参数是 Win32 约定：按钮消息 lparam
+  用客户区坐标，滚轮 lparam 用屏幕坐标、wparam 高字是带符号滚动量。截图坐标要先换算。
 
 ## 效果验证、超时与知识回写
 查询保存真实 result/text；写入用读回；点击用目标状态/反馈；滚动用位置和项目变化。

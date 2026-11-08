@@ -74,6 +74,9 @@ TH32CS_SNAPPROCESS = 0x00000002
 
 # How long the hiding loop may run: launch contention, not a measurement.
 _SETTLE_POLL = 0.05
+# The second pass keeps watching this long for a window that appears late, so a
+# misbehaving app cannot hold the call open forever.
+_SECOND_PHASE_SECONDS = 1.5
 
 
 def is_shown(hwnd: int) -> bool:
@@ -372,10 +375,11 @@ def launch(
         quiet = quiet + 1 if stable else 0
         # Phase 1 contends for `settle` seconds; phase 2 keeps watching for a
         # moment so a window that appears late is still caught. Both phases are
-        # hard-bounded, so a stubborn app cannot hold the call open.
+        # hard-bounded in wall time: an app that keeps opening windows must not
+        # extend the call, and a window storm must not turn into a long loop.
         if settled and quiet >= 8:
             break
-        if settled and passes > 400:
+        if time.time() > deadline + _SECOND_PHASE_SECONDS:
             break
         time.sleep(_SETTLE_POLL)
 

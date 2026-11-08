@@ -121,6 +121,18 @@ class TestWorkerRouting(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertTrue(type(result[1]).__name__ == "Image")
 
+    def test_a_successful_see_still_reports_the_foreground_sample(self):
+        """see is a window tool: the shared sample must reach the caller even
+        when the result is content blocks rather than a plain dict."""
+        payload = {"ok": True, "meta": {"ok": True, "hwnd": 5}, "png": None,
+                   "foreground_before": 11, "foreground_after": 11,
+                   "foreground_changed": False}
+        with mock.patch.object(server, "_worker_call", return_value=payload):
+            result = self.run_tool("see", hwnd=5)
+        meta = json.loads(result[0])
+        self.assertEqual(meta["foreground_before"], 11)
+        self.assertIn("foreground_changed", meta)
+
     def test_a_failed_see_is_not_reported_as_an_image(self):
         payload = {"ok": False, "reason": "desktop call timed out",
                    "detail": "discarded", "execution_state": "unknown"}
@@ -161,6 +173,21 @@ class TestWorkerRouting(unittest.TestCase):
                               return_value={"ok": True}) as post:
             self.run_tool("post_message", hwnd=5, msg=0)
         post.assert_called_once()
+
+    def test_open_app_rejects_a_non_numeric_settle(self):
+        """A string settle reaches `time.time() + settle` and raises TypeError,
+        which surfaces as a server error instead of an argument error."""
+        with mock.patch.object(server, "_launch") as launch:
+            with self.assertRaises(Exception):
+                self.call("open_app", {"command": "x.exe", "settle": "abc"})
+            launch.assert_not_called()
+
+    def test_open_app_keeps_the_foreground_sample(self):
+        with mock.patch.object(server, "_launch",
+                               return_value={"ok": True, "hidden_windows": []}):
+            with mock.patch.object(server.win32, "foreground", return_value=7):
+                result = self.run_tool("open_app", command="x.exe")
+        self.assertIn("foreground_before", result)
 
     def test_foreground_fields_are_added_to_a_window_tool(self):
         # Mock the worker, not _worker_call: adding the foreground sample to

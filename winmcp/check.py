@@ -203,9 +203,16 @@ def main() -> int:
                   f"{wrote.get('reason')} / {wrote.get('verification_reason')}")
             check("post_message leaves the foreground alone",
                   wrote.get("foreground_changed") is False)
+            # A caller asking for the write without permission must be refused
+            # before anything is sent, and the refusal names permission.
             denied = win32.post_message(edit["hwnd"], 0x000C, wait=True, text="x")
             check("post_message gates a setter behind permission",
-                  denied.get("needs_permission") is True)
+                  denied.get("needs_permission") is True,
+                  f"{denied.get('reason')}: {denied.get('detail')}")
+            click_denied = win32.post_message(edit["hwnd"], 0x00F5, wait=False)
+            check("post_message gates a queued click behind permission",
+                  click_denied.get("needs_permission") is True,
+                  str(click_denied.get("reason")))
             unsafe = win32.post_message(edit["hwnd"], 0x004A, wait=True,
                                         allow_unsafe=True, allow_foreground=True)
             check("post_message refuses an unmanaged payload",

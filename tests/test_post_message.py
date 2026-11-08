@@ -119,6 +119,31 @@ class TestValidation(PostCase):
         self.assertEqual(allowed["delivery"], "returned")
         send.assert_called_once()
 
+    def test_input_messages_need_permission(self):
+        """Synthesised mouse and keyboard input is a side effect like any other.
+
+        These are in the known-scalar set because they carry no pointer, but a
+        click or a keystroke changes the application - the permission gate has
+        to cover them, or any caller can type into any window for free.
+        """
+        for msg in (0x0201, 0x0202, 0x020A, 0x0100, 0x0101, 0x0102):
+            with self.send_scalar() as send:
+                denied = win32.post_message(self.child, msg)
+            self.assertTrue(denied.get("needs_permission"), hex(msg))
+            self.assertEqual(denied["execution_state"], "not_started", hex(msg))
+            send.assert_not_called()
+            with self.send_scalar(0) as send:
+                allowed = win32.post_message(self.child, msg, allow_foreground=True)
+            self.assertEqual(allowed["delivery"], "returned", hex(msg))
+            send.assert_called_once()
+
+    def test_input_messages_never_queue_without_permission(self):
+        for msg in (0x0201, 0x020A, 0x0102):
+            with mock.patch.object(win32.user32, "PostMessageW") as post:
+                denied = win32.post_message(self.child, msg, wait=False)
+            self.assertTrue(denied.get("needs_permission"), hex(msg))
+            post.assert_not_called()
+
 
 class TestManagedText(PostCase):
     def fake_send_text(self, written=None, result=1, completed=True, error=0, capture=None):
@@ -160,6 +185,23 @@ class TestManagedText(PostCase):
             result = win32.post_message(self.child, WM_GETTEXT, wait=True, max_chars=8)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "invalid message result")
+
+    def test_settext_needs_permission_even_though_it_is_managed(self):
+        """Managed means "no pointer crosses the protocol", not "read-only".
+
+        A managed write is still a write, and must be refused before it is sent.
+        """
+        with self.fake_send_text("x", result=1) as send:
+            denied = win32.post_message(self.child, WM_SETTEXT, text="x", wait=True)
+        self.assertFalse(denied["ok"])
+        self.assertTrue(denied.get("needs_permission"))
+        self.assertEqual(denied["execution_state"], "not_started")
+        send.assert_not_called()
+
+    def test_gettext_is_allowed_in_the_background(self):
+        with self.fake_send_text("hello", result=5):
+            allowed = win32.post_message(self.child, WM_GETTEXT, wait=True, max_chars=32)
+        self.assertTrue(allowed["ok"], allowed)
 
     def test_lone_surrogate_is_repaired_and_flagged(self):
         with self.fake_send_text("\ud83d", result=1):

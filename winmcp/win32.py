@@ -293,12 +293,20 @@ LB_GETCURSEL = 0x0188
 # marshal. allow_unsafe only relaxes the unknown-scalar check, never these.
 _UNMANAGED = frozenset({0x004A, 0x0233})  # WM_COPYDATA, WM_DROPFILES
 
-# Scalars that carry no pointer. The caller still owns the business permission:
-# a click or a keystroke here is a real side effect.
+# Known messages that carry no pointer. Being on this list only means "no
+# payload to marshal" - it says nothing about safety.
 _SCALARS = frozenset({
     0x0000, 0x000E, 0x00F5, 0x00F0, 0x0147, 0x0188,
     0x0100, 0x0101, 0x0102, 0x0201, 0x0202, 0x020A,
 })
+
+# The ones that only answer a question. Everything else - a click, a keystroke,
+# a wheel, a setter, an unknown scalar - changes the application and needs the
+# same permission as any other action, even though it carries no pointer.
+# Managed does not mean read-only: WM_GETTEXT is a query, WM_SETTEXT is a write.
+_READ_ONLY_MESSAGES = frozenset({WM_NULL, WM_GETTEXTLENGTH, BM_GETCHECK,
+                                 CB_GETCURSEL, LB_GETCURSEL, WM_GETTEXT})
+_MANAGED_MESSAGES = frozenset({WM_GETTEXT, WM_SETTEXT})
 
 # Class tokens that make a checkbox or list message meaningful. WindowsForms
 # names its classes WindowsForms10.BUTTON..., so match anywhere in the string.
@@ -414,7 +422,7 @@ def post_message(hwnd: int, msg: int, wparam: int = 0, lparam: int = 0,
         return _fail("message payload unsupported",
                      f"0x{msg:04X} carries a payload this service cannot marshal", before)
 
-    is_text = msg in (WM_GETTEXT, WM_SETTEXT)
+    is_text = msg in _MANAGED_MESSAGES
     if is_text:
         # Validate the managed-text contract before any permission gate, so a
         # caller learns its own arguments are wrong instead of being denied.
@@ -430,15 +438,18 @@ def post_message(hwnd: int, msg: int, wparam: int = 0, lparam: int = 0,
             if not any(token in actual for token in checks):
                 return _fail("control class mismatch",
                              f"class {class_name(hwnd)!r} cannot answer 0x{msg:04X}", before)
-        elif msg in _SCALARS or msg in (WM_NULL,):
+        elif msg in _SCALARS:
             pass
         elif not allow_unsafe:
             return _fail("unsafe message",
                          f"0x{msg:04X} is not a known scalar; pass allow_unsafe=true "
                          "only after confirming it carries no pointer or handle", before)
 
-    controlled = msg in _SETTER or msg == BM_CLICK or (msg not in _SCALARS and not is_text)
-    if controlled and not allow_foreground:
+    # The permission gate is about effect, not about payload shape: a click, a
+    # keystroke or a wheel message changes the application just as much as a
+    # setter does, and carries no pointer to make that obvious.
+    if msg not in _READ_ONLY_MESSAGES \
+            and not allow_foreground:
         result = _fail("needs permission",
                        f"0x{msg:04X} may change the window or its data", before)
         result["needs_permission"] = True

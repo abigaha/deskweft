@@ -45,6 +45,23 @@ class ResponseTooLarge(Exception):
     """The result cannot be framed even without its image."""
 
 
+class StartupFailure(Exception):
+    """A worker could not be started.
+
+    `transport_ready` says whether the standard-library handle handoff
+    completed. Before it, the handoff is unproven and a rebuild risks leaking
+    resources, so the service becomes sticky unavailable. After it, the child
+    was reaped cleanly and a later call may legitimately build a new worker.
+    """
+
+    def __init__(self, detail: str, *, transport_ready: bool, reason: str = ""):
+        super().__init__(detail)
+        self.detail = detail
+        self.transport_ready = transport_ready
+        self.reason = reason or ("worker init timeout" if transport_ready
+                                 else "worker unavailable")
+
+
 # ---------- framing ----------
 
 
@@ -108,7 +125,12 @@ def _recv_frame(channel: socket.socket, deadline: float | None) -> dict:
 
 
 def _encode_result(result: dict) -> dict:
-    """Turn {meta, png} into wire data: the image is base64, or dropped."""
+    """Turn {meta, png} into wire data: the image is base64, or dropped.
+
+    An image is cheap to obtain again; the tree is not. So when the two together
+    do not fit in a frame, the image goes and the tree is kept. Only metadata
+    that cannot fit on its own is an error, and then it is a named one.
+    """
     meta = dict(result.get("meta") or {})
     png = result.get("png")
     if not isinstance(meta, dict):
@@ -119,6 +141,12 @@ def _encode_result(result: dict) -> dict:
             meta["image_unavailable"] = "IPC image size limit"
         else:
             encoded["png_b64"] = base64.b64encode(bytes(png)).decode("ascii")
+            try:
+                _encode_frame(dict(encoded))
+            except ValueError:
+                # Meta + image together overflow: retry without the picture.
+                encoded["png_b64"] = None
+                meta["image_unavailable"] = "IPC image size limit"
     try:
         _encode_frame(dict(encoded))
     except ValueError:
@@ -325,6 +353,7 @@ def _spawn() -> dict:
     parent, child = socket.socketpair()
     parent.setblocking(False)
     proc = None
+    handoff = False
     try:
         proc = context.Process(target=_worker_main, args=(child,), daemon=True)
         started = time.monotonic()
@@ -334,26 +363,39 @@ def _spawn() -> dict:
         deadline = time.monotonic() + STARTUP_MS / 1000
         first = _recv_frame(parent, deadline)
         if not first.get("transport_ready"):
-            raise ValueError("worker rejected the transport")
+            raise StartupFailure("worker rejected the transport", transport_ready=False)
+        # From here the standard-library handoff is known to have completed, so
+        # a failure below may safely be retried by a later call.
+        handoff = True
         second = _recv_frame(parent, deadline)
         if second.get("ready") is not True:
-            raise RuntimeError(second.get("detail") or "worker init failed")
+            raise StartupFailure(second.get("detail") or "worker init failed",
+                                 transport_ready=True, reason="worker init failed")
         return {"process": proc, "channel": parent, "started": True,
                 "transport_ready": True, "start_ms": start_ms,
                 "startup_ms": round((time.monotonic() - started) * 1000, 1)}
-    except Exception:
+    except StartupFailure:
         _reap(proc, parent)
         raise
+    except Exception as error:
+        _reap(proc, parent)
+        raise StartupFailure(f"{type(error).__name__}: {error}",
+                             transport_ready=handoff) from None
 
 
-def _reap(proc, channel) -> float:
-    """Terminate, join, kill, join. Returns the time spent, for reporting."""
+def _reap(proc, channel) -> tuple[float, bool]:
+    """Terminate, join, kill, join. Returns (ms spent, whether it survived).
+
+    A survivor is a real condition, not a timing detail: the caller must stop
+    creating workers, because each rebuild would leak another wedged child.
+    """
     began = time.monotonic()
     if channel is not None:
         try:
             channel.close()
         except OSError:
             pass
+    alive = False
     if proc is not None:
         try:
             if proc.is_alive():
@@ -362,22 +404,33 @@ def _reap(proc, channel) -> float:
             if proc.is_alive():
                 proc.kill()
                 proc.join(CLOSE_GRACE_MS / 1000)
+            alive = bool(proc.is_alive())
         except Exception:
-            pass
-        try:
-            proc.close()
-        except Exception:
-            pass
-    return round((time.monotonic() - began) * 1000, 1)
+            alive = True
+        if not alive:
+            try:
+                proc.close()
+            except Exception:
+                pass
+    return round((time.monotonic() - began) * 1000, 1), alive
 
 
 def _discard(reason: str) -> float:
-    """Drop the current worker; the next call may build a fresh one."""
-    global _worker
+    """Drop the current worker; the next call may build a fresh one.
+
+    If the process survived both terminate and kill, it is kept referenced and
+    the service goes sticky unavailable: leaking one wedged child per request
+    is worse than an honest refusal that names the condition.
+    """
+    global _worker, _unavailable
     worker, _worker = _worker, None
     if worker is None:
         return 0.0
-    return _reap(worker.get("process"), worker.get("channel"))
+    elapsed, alive = _reap(worker.get("process"), worker.get("channel"))
+    if alive:
+        _unavailable = (f"worker unavailable: process {worker.get('process')} "
+                        f"survived terminate and kill ({reason})")
+    return elapsed
 
 
 def _ensure() -> dict:
@@ -424,6 +477,16 @@ def call(action: str, parameters: dict, timeout_ms: int) -> dict:
             worker = _ensure()
         except RuntimeError as error:
             return _unavailable_result(str(error))
+        except StartupFailure as error:
+            if error.transport_ready:
+                # The handoff completed and the child was reaped, so this is a
+                # transient start problem: report it, let the next call retry,
+                # and never leave every desktop tool permanently disabled.
+                return {"ok": False, "reason": error.reason, "detail": error.detail,
+                        "execution_state": "not_started", "effect_verified": False,
+                        "retry_safe": True, "worker_restarted": False}
+            _set_unavailable(error)
+            return _unavailable_result(f"worker unavailable: {error.detail}")
         except Exception as error:
             _set_unavailable(error)
             return _unavailable_result(f"worker unavailable: {error}")

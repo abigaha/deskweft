@@ -15,7 +15,10 @@ from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from pydantic import StrictBool, StrictInt, StrictStr
 
-from . import appinfo, memory, uia_worker, win32
+from . import appinfo, launch as _launch_module, memory, uia_worker, win32
+
+# Bound at import time so tests can replace one name instead of the module.
+_launch = _launch_module.launch
 
 INSTRUCTIONS = """\
 Window-addressed desktop control for Windows. Never takes the foreground unless
@@ -119,9 +122,14 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
     flags here stop that. Re-running this does not restart a single-instance
     app, so the flags may not be adopted - check the process.
     """
-    from . import launch
-
-    result = launch.launch(
+    # settle stays a float for signature compatibility, but a JSON string would
+    # reach `time.time() + settle` and raise; reject it as an argument instead.
+    if isinstance(settle, bool) or not isinstance(settle, (int, float)) \
+            or not 0 <= settle <= 120:
+        return {"ok": False, "reason": "invalid arguments",
+                "detail": "settle must be a number of seconds in 0..120",
+                "execution_state": "not_started", "retry_safe": True}
+    result = _launch(
         command, args, settle=settle, hide_new_windows=not show,
         accessibility=accessibility,
     )
@@ -130,6 +138,7 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
             "Windows are hidden. Use see(hwnd) to inspect one, or reveal(hwnd) "
             "to show it - reveal moves the foreground, so ask first."
         )
+    result.update(_foreground())
     return result
 
 
@@ -140,11 +149,9 @@ def reveal(hwnd: StrictInt) -> dict:
     Ask the user before calling this: it is the one operation that changes what
     they are looking at.
     """
-    from . import launch
-
     if not win32.title(hwnd) and not win32.class_name(hwnd):
         return {"ok": False, "reason": "no such window", "detail": f"hwnd {hwnd} is gone"}
-    ok = launch.force_foreground(hwnd)
+    ok = _launch_module.force_foreground(hwnd)
     return {
         "ok": ok,
         "hwnd": hwnd,
@@ -188,6 +195,11 @@ def see(hwnd: StrictInt, with_tree: StrictBool = False, timeout_ms: StrictInt = 
         return [json.dumps(result if isinstance(result, dict) else
                            {"ok": False, "reason": "worker result invalid"}, ensure_ascii=False)]
     meta = result["meta"]
+    # see returns content blocks rather than a dict, so the shared foreground
+    # sample has to be merged into meta - the one place it can survive.
+    for field in ("foreground_before", "foreground_after", "foreground_changed"):
+        if field in result:
+            meta[field] = result[field]
     # Text first, image second: FastMCP only turns Image instances into image
     # content blocks when they sit beside plain text, not beside a dict.
     response: list = [json.dumps(meta, ensure_ascii=False)]
@@ -318,12 +330,14 @@ def post_message(hwnd: StrictInt, msg: StrictInt, wparam: StrictInt = 0,
     WM_SETTEXT is verified by reading the control back inside the same budget,
     and a mismatch or an unreadable value keeps the real state visible.
 
-    Setter, click, keyboard and unknown messages need allow_foreground=true;
-    unknown scalars also need allow_unsafe=true, and messages that carry
-    pointers (WM_COPYDATA, WM_DROPFILES) are refused either way. Mouse
-    parameters follow the Win32 convention: button messages use client
-    coordinates, WM_MOUSEWHEEL uses screen coordinates and a signed wheel delta
-    in the high word of wparam.
+    Setter, click, keyboard, wheel and unknown messages all need
+    allow_foreground=true; unknown scalars also need allow_unsafe=true, and
+    messages that carry pointers (WM_COPYDATA, WM_DROPFILES) are refused either
+    way. Permission is judged by effect, not by payload shape: WM_LBUTTONDOWN,
+    WM_MOUSEWHEEL and WM_KEYDOWN are no-pointer messages that still click and
+    type. Mouse parameters follow the Win32 convention: button messages use
+    client coordinates, WM_MOUSEWHEEL uses screen coordinates and a signed wheel
+    delta in the high word of wparam.
     """
     return win32.post_message(hwnd, msg, wparam, lparam, allow_unsafe,
                               allow_foreground, wait, timeout_ms, text, max_chars)
