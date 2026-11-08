@@ -9,7 +9,7 @@ import ctypes
 import unittest
 from unittest import mock
 
-from winmcp import win32
+from deskweft import win32
 
 WM_GETTEXT = 0x000D
 WM_SETTEXT = 0x000C

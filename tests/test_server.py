@@ -1,4 +1,4 @@
-"""server.py: 15 tools, strict schemas, every desktop call through the worker.
+"""server.py: 16 tools, strict schemas, every desktop call through the worker.
 
 The MCP surface is exercised in-process; nothing opens a window or a socket.
 """
@@ -12,7 +12,7 @@ from unittest import mock
 
 from fastmcp import Client
 
-from winmcp import server
+from deskweft import server
 
 
 def tool_names():
@@ -25,15 +25,15 @@ async def list_tools():
 
 
 class TestSurface(unittest.TestCase):
-    def test_exactly_fifteen_tools(self):
+    def test_exactly_sixteen_tools(self):
         names = tool_names()
-        self.assertEqual(len(names), 15, names)
+        self.assertEqual(len(names), 16, names)
 
     def test_the_expected_names(self):
         names = set(tool_names())
         self.assertEqual(names, {
             "open_app", "reveal", "windows", "see", "click", "type_text", "key",
-            "scroll", "app_info", "invoke_pattern", "post_message", "recall",
+            "scroll", "app_info", "invoke_pattern", "find_items", "post_message", "recall",
             "remember", "approve", "confirm_proven",
         })
 
@@ -112,7 +112,7 @@ class TestWorkerRouting(unittest.TestCase):
         call.assert_called_once()
         self.assertEqual(call.call_args.args[0], "see")
         self.assertIsInstance(result, list)
-        self.assertEqual(json.loads(result[0])["hwnd"], 5)
+        self.assertEqual(json.loads(result[0].text)["hwnd"], 5)
 
     def test_see_returns_text_then_image(self):
         payload = {"ok": True, "meta": {"ok": True, "hwnd": 5}, "png": b"\x89PNG"}
@@ -129,7 +129,7 @@ class TestWorkerRouting(unittest.TestCase):
                    "foreground_changed": False}
         with mock.patch.object(server, "_worker_call", return_value=payload):
             result = self.run_tool("see", hwnd=5)
-        meta = json.loads(result[0])
+        meta = json.loads(result[0].text)
         self.assertEqual(meta["foreground_before"], 11)
         self.assertIn("foreground_changed", meta)
 
@@ -139,7 +139,7 @@ class TestWorkerRouting(unittest.TestCase):
         with mock.patch.object(server, "_worker_call", return_value=payload):
             result = self.run_tool("see", hwnd=5)
         self.assertEqual(len(result), 1)
-        self.assertFalse(json.loads(result[0])["ok"])
+        self.assertFalse(json.loads(result[0].text)["ok"])
 
     def test_click_sends_only_plain_parameters(self):
         with mock.patch.object(server, "_worker_call",
@@ -197,6 +197,30 @@ class TestWorkerRouting(unittest.TestCase):
             result = self.run_tool("click", hwnd=5, target="x")
         self.assertIn("foreground_before", result)
         self.assertIn("foreground_changed", result)
+
+    def test_worker_foreground_evidence_survives_server_wrapping(self):
+        payload = {"ok": True, "foreground_before": 11, "foreground_after": 22,
+                   "foreground_changed": True}
+        with mock.patch.object(server.uia_worker, "call", return_value=payload), \
+             mock.patch.object(server.win32, "foreground", return_value=22):
+            result = server.click(5, target="OK", allow_foreground=True)
+        self.assertEqual(result["foreground_before"], 11)
+        self.assertEqual(result["foreground_after"], 22)
+        self.assertTrue(result["foreground_changed"])
+
+    def test_fallback_foreground_sample_spans_the_worker_call(self):
+        foreground = [11]
+
+        def worker(*args):
+            foreground[0] = 22
+            return {"ok": False, "reason": "desktop call timed out"}
+
+        with mock.patch.object(server.uia_worker, "call", side_effect=worker), \
+             mock.patch.object(server.win32, "foreground", side_effect=lambda: foreground[0]):
+            result = server.click(5, target="OK", allow_foreground=True)
+        self.assertEqual(result["foreground_before"], 11)
+        self.assertEqual(result["foreground_after"], 22)
+        self.assertTrue(result["foreground_changed"])
 
 
 class TestLifespan(unittest.TestCase):

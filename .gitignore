@@ -17,3 +17,6 @@ helper.err.log
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Local live-session screenshots, traces and deployment backups
+.superpowers/

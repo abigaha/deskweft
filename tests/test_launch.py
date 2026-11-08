@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from winmcp import launch
+from deskweft import launch
 
 
 class LaunchCase(unittest.TestCase):

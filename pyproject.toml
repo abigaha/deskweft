@@ -1,13 +1,16 @@
 [project]
-name = "winmcp"
+name = "deskweft"
 version = "0.1.0"
-description = "Window-targeted desktop control that never takes the foreground"
+description = "Windows automation with reusable skills, versioned memory and guarded MCP execution"
 requires-python = ">=3.14"
 dependencies = ["windows-mcp==0.8.8", "PyYAML>=6,<7", "psutil>=7,<8"]
 
 [project.scripts]
-winmcp = "winmcp.server:main"
+deskweft = "deskweft.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["deskweft*"]

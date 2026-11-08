@@ -34,8 +34,9 @@ _write_lock = threading.Lock()
 
 def _real_memory_root() -> Path:
     """The unpatched resolver; tests replace the module attribute `memory_root`."""
-    configured = os.environ.get("WINMCP_MEMORY_DIR")
+    configured = os.environ.get("DESKWEFT_MEMORY_DIR") or os.environ.get("WINMCP_MEMORY_DIR")
     return (Path(configured).expanduser() if configured else
+            # Preserve the existing data directory so a rename never hides user memory.
             Path(os.environ["LOCALAPPDATA"]) / "winmcp" / "memory")
 
 

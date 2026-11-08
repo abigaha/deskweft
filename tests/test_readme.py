@@ -6,7 +6,7 @@ import asyncio
 import unittest
 from pathlib import Path
 
-from winmcp import server
+from deskweft import server
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 

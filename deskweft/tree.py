@@ -114,10 +114,7 @@ def _describe(el, nth: int, diagnostics: dict, depth: int | None = None) -> dict
     `_el` stays for act(); every other value is plain data that can cross a
     process boundary.
     """
-    try:
-        control_type = el.ControlTypeName
-    except Exception:
-        control_type = "?"
+    control_type = _read(el, "ControlTypeName", "?", "control_type", diagnostics)
     diagnostics["control_type"] = control_type
     automation_id = _read(el, "AutomationId", "", "automation_id", diagnostics) or ""
     diagnostics["automation_id"] = automation_id
@@ -209,10 +206,7 @@ def read_detailed(hwnd: int, timeout_ms: int = DEFAULT_TIMEOUT_MS,
                 diagnostics["filtered_offscreen"] += 1
                 continue
             info = _describe(child, 0, diagnostics, depth)
-            if not info["name"] and not info["patterns"]:
-                diagnostics["filtered_anonymous"] += 1
-                walk(child, depth)
-                continue
+            # An unnamed node can still match an id/type/handle selector.
             key = (info["control_type"], info["automation_id"], info["name"])
             info["nth"] = counts.get(key, 0)
             counts[key] = info["nth"] + 1
@@ -264,14 +258,45 @@ def unique(matches: list[dict]) -> dict | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def resolve(detailed: dict, target: str, *, exact_only: bool = False) -> dict:
+def target_error(target: str | dict) -> str | None:
+    """Validate plain target data before any provider or message is reached."""
+    if isinstance(target, str):
+        return None
+    if not isinstance(target, dict):
+        return "target must be a string or a selector object"
+    unknown = set(target) - {"name", "automation_id", "control_type", "native_hwnd", "rect"}
+    if unknown:
+        return f"unsupported selector fields: {unknown!r}"
+    for field in ("name", "automation_id", "control_type"):
+        if field in target and not isinstance(target[field], str):
+            return f"{field} must be a string"
+    if "native_hwnd" in target and (type(target["native_hwnd"]) is not int
+                                    or target["native_hwnd"] <= 0):
+        return "native_hwnd must be a positive integer, not a bool"
+    if not any(target.get(field, "").strip()
+               for field in ("name", "automation_id", "control_type")) \
+            and "native_hwnd" not in target:
+        return "selector needs a non-empty name, automation_id, control_type or native_hwnd"
+    if "rect" in target:
+        rect = target["rect"]
+        if not isinstance(rect, list) or len(rect) != 4 \
+                or any(type(value) is not int for value in rect) \
+                or rect[2] <= 0 or rect[3] <= 0:
+            return "rect must be [x, y, width, height] integers with positive width and height"
+    return None
+
+
+def resolve(detailed: dict, target: str | dict, *, exact_only: bool = False) -> dict:
     """Turn one target into a unique element, or say why it cannot.
 
-    Layers run exact AutomationId -> exact name -> (unless exact_only) name
+    Selectors AND exact fields. String layers run AutomationId -> name -> (unless exact_only) name
     substring. Each layer must yield exactly one candidate: "take the first"
     is how a click lands on the wrong control.
     """
-    if not target:
+    error = target_error(target)
+    if error:
+        return {"ok": False, "reason": "invalid target", "detail": error}
+    if target == "":
         return {"ok": False, "reason": "target required",
                 "detail": "an empty target cannot select a control"}
     if detailed.get("timed_out") or detailed.get("limit_reached") \
@@ -279,12 +304,21 @@ def resolve(detailed: dict, target: str, *, exact_only: bool = False) -> dict:
         return {"ok": False, "reason": "tree incomplete",
                 "detail": "the tree was truncated, timed out or unreadable"}
     elements = [e for e in detailed.get("elements", []) if "_el" in e]
-    layers = [("automation_id", lambda e: e["automation_id"] == target),
-              ("name", lambda e: e["name"] == target)]
-    if not exact_only:
-        low = target.casefold()
-        layers.append(("name substring",
-                       lambda e: bool(e["name"]) and low in e["name"].casefold()))
+    if isinstance(target, dict):
+        diagnostics = detailed.get("tree_diagnostics", {})
+        # An unreadable rect/type/handle can hide another matching candidate.
+        if diagnostics.get("warnings_truncated") or any(
+                warning.get("stage") in target for warning in diagnostics.get("warnings", [])):
+            return {"ok": False, "reason": "tree incomplete",
+                    "detail": "a selector field could not be read for every control"}
+        layers = [("selector", lambda e: all(e.get(key) == value for key, value in target.items()))]
+    else:
+        layers = [("automation_id", lambda e: e["automation_id"] == target),
+                  ("name", lambda e: e["name"] == target)]
+        if not exact_only:
+            low = target.casefold()
+            layers.append(("name substring",
+                           lambda e: bool(e["name"]) and low in e["name"].casefold()))
     for label, predicate in layers:
         matches = [e for e in elements if predicate(e)]
         if len(matches) == 1:

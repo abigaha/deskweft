@@ -49,6 +49,17 @@ _TEXT_CLASSES = ("Edit", "RICHEDIT", "Scintilla", "ComboBox")
 # Get prefix is not evidence of safety, and a provider's Getter can still move
 # the foreground - which is why a measured counterexample belongs in memory.
 _READ_ONLY_MEMBERS = {
+    "AnnotationPattern": {"AnnotationTypeId", "AnnotationTypeName", "Author", "DateTime"},
+    "DockPattern": {"DockPosition"},
+    "DragPattern": {"DropEffect", "IsGrabbed"},
+    "DropTargetPattern": {"DropTargetEffect"},
+    "ExpandCollapsePattern": {"ExpandCollapseState"},
+    "GridItemPattern": {"Column", "ColumnSpan", "Row", "RowSpan"},
+    "GridPattern": {"ColumnCount", "RowCount"},
+    "LegacyIAccessiblePattern": {"ChildId", "DefaultAction", "Description", "Help",
+                                 "KeyboardShortcut", "Name", "Role", "State", "Value",
+                                 "GetSelection"},
+    "MultipleViewPattern": {"CurrentView"},
     "ValuePattern": {"Value", "IsReadOnly"},
     "RangeValuePattern": {"Value", "IsReadOnly", "Minimum", "Maximum",
                           "SmallChange", "LargeChange"},
@@ -59,6 +70,15 @@ _READ_ONLY_MEMBERS = {
     "ScrollPattern": {"HorizontallyScrollable", "VerticallyScrollable",
                       "HorizontalScrollPercent", "VerticalScrollPercent",
                       "HorizontalViewSize", "VerticalViewSize"},
+    "SpreadsheetItemPattern": {"Formula"},
+    "StylesPattern": {"ExtendedProperties", "FillColor", "FillPatternColor", "Shape",
+                      "StyleId", "StyleName"},
+    "TablePattern": {"RowOrColumnMajor"},
+    "TogglePattern": {"ToggleState"},
+    "TransformPattern": {"CanMove", "CanResize", "CanRotate"},
+    "TransformPattern2": {"CanZoom", "ZoomLevel", "ZoomMaximum", "ZoomMinimum"},
+    "WindowPattern": {"CanMaximize", "CanMinimize", "IsModal", "IsTopmost",
+                      "WindowInteractionState", "WindowVisualState"},
 }
 
 # Wrapper methods that act on the UI. Listed, never inferred from a name prefix.
@@ -109,7 +129,8 @@ def _fail(reason: str, detail: str, before: int, *, state: str = "not_started",
     return out
 
 
-def _child(hwnd: int, target: str, classes: tuple[str, ...]) -> dict:
+def _child(hwnd: int, target: str | dict, classes: tuple[str, ...],
+           *, native_hwnd: int | None = None) -> dict:
     """A native child of an allowed class, only when the match is unique.
 
     Layers keep the old priority - exact text, text substring, class substring -
@@ -118,6 +139,13 @@ def _child(hwnd: int, target: str, classes: tuple[str, ...]) -> dict:
     """
     kids = [k for k in win32.children(hwnd)
             if any(c.casefold() in k["class"].casefold() for c in classes)]
+    if isinstance(target, dict):
+        # All selector fields were resolved against UIA before using this handle.
+        matches = [k for k in kids if k["hwnd"] == native_hwnd]
+        if len(matches) == 1:
+            return {"ok": True, "child": matches[0]}
+        return {"ok": False, "reason": "no such control",
+                "detail": "the resolved control has no allowed native child handle"}
     if not target:
         if len(kids) == 1:
             return {"ok": True, "child": kids[0]}
@@ -222,7 +250,7 @@ def _one_key(key: str) -> str:
     return "{%s}" % key
 
 
-def _target(hwnd: int, target: str, before: int) -> dict:
+def _target(hwnd: int, target: str | dict, before: int) -> dict:
     """Resolve a target through the detailed tree, or return the refusal."""
     detailed = tree.read_detailed(hwnd, timeout_ms=3000, max_elements=600)
     found = tree.resolve(detailed, target)
@@ -234,19 +262,30 @@ def _target(hwnd: int, target: str, before: int) -> dict:
 def act(
     hwnd: int,
     action: str,
-    target: str = "",
+    target: str | dict = "",
     text: str = "",
     allow_foreground: bool = False,
 ) -> dict:
     """action: click | type | key | scroll"""
     start = time.perf_counter()
     fg_before = win32.foreground()
+    error = tree.target_error(target)
+    if error:
+        return _fail("invalid target", error, fg_before)
     if not win32.title(hwnd):
         return _fail("no such window", f"hwnd {hwnd} is gone", fg_before)
 
+    resolved = None
+    native_hwnd = None
+    if isinstance(target, dict):
+        resolved = _target(hwnd, target, fg_before)
+        if not resolved["ok"]:
+            return _fail(resolved["reason"], resolved["detail"], fg_before)
+        native_hwnd = resolved["hit"].get("native_hwnd")
+
     # ---------- tier 1: native child + window message ----------
     if action == "click":
-        found = _child(hwnd, target, _BUTTON_CLASSES)
+        found = _child(hwnd, target, _BUTTON_CLASSES, native_hwnd=native_hwnd)
         if found["ok"]:
             child = found["child"]
             posted = win32.user32.PostMessageW(child["hwnd"], BM_CLICK, 0, 0)
@@ -260,7 +299,7 @@ def act(
             return _fail(found["reason"], found["detail"], fg_before)
 
     if action == "type":
-        found = _child(hwnd, target, _TEXT_CLASSES)
+        found = _child(hwnd, target, _TEXT_CLASSES, native_hwnd=native_hwnd)
         if found["ok"]:
             child = found["child"]
             # The internal managed write, not the public wrapper: the wrapper's
@@ -307,7 +346,7 @@ def act(
         el = ControlFromHandle(hwnd)
         return _scroll(hwnd, el, "", text, fg_before, start)
 
-    found = _target(hwnd, target, fg_before)
+    found = resolved or _target(hwnd, target, fg_before)
     if not found["ok"]:
         return _fail(found["reason"], found["detail"], fg_before)
     hit = found["hit"]
@@ -326,7 +365,7 @@ def _units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _click_uia(hwnd: int, hit: dict, el, target: str, fg_before: int, start: float) -> dict:
+def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, start: float) -> dict:
     """Legacy first (measured not to take the foreground), then the other routes.
 
     Once a route has been called, its real outcome is reported: a False return,
@@ -377,7 +416,7 @@ def _click_uia(hwnd: int, hit: dict, el, target: str, fg_before: int, start: flo
                  fg_before)
 
 
-def _type_uia(hwnd: int, hit: dict, el, target: str, text: str,
+def _type_uia(hwnd: int, hit: dict, el, target: str | dict, text: str,
               fg_before: int, start: float) -> dict:
     """ValuePattern first; real typing only when the pattern is absent.
 
@@ -442,7 +481,7 @@ def _type_uia(hwnd: int, hit: dict, el, target: str, text: str,
                  effect_verified=True)
 
 
-def _scroll(hwnd: int, el, target: str, direction: str, fg_before: int,
+def _scroll(hwnd: int, el, target: str | dict, direction: str, fg_before: int,
             start: float) -> dict:
     if direction not in ("up", "down"):
         return _fail("invalid arguments", "direction must be 'up' or 'down'", fg_before)
@@ -508,7 +547,7 @@ def _keys(hwnd: int, keys: str, fg_before: int, start: float) -> dict:
     return _done(hwnd, "key", keys, "cursor:keys", fg_before, start)
 
 
-def _done(hwnd: int, action: str, target: str, route: str, fg_before: int,
+def _done(hwnd: int, action: str, target: str | dict, route: str, fg_before: int,
           start: float, *, ok: bool = True, effect_verified: bool = False,
           delivery: str = "returned", **extra) -> dict:
     fg_after = win32.foreground()
@@ -670,11 +709,11 @@ def _pattern_id_hint(pattern: str) -> dict:
     return {"pattern_id": known[1]} if known else {}
 
 
-def invoke_pattern(hwnd: int, pattern: str, target: str,
+def invoke_pattern(hwnd: int, pattern: str, target: str | dict,
                    method: str, args: list | None = None,
                    allow_foreground: bool = False,
                    timeout_ms: int = 8000) -> dict:
-    """Read or call one public UIA pattern member on a uniquely named control.
+    """Read or call one public UIA pattern member on a uniquely identified control.
 
     `method` is a public member path such as "Value" or
     "DocumentRange.GetText"; the last part is called if it is a method and read
@@ -682,7 +721,8 @@ def invoke_pattern(hwnd: int, pattern: str, target: str,
     allow_foreground - a Get prefix is not proof of safety.
 
     target="" means the window's root element. Any other target is resolved in
-    the same thread against a complete tree, exact AutomationId then exact name;
+    the same thread against a complete tree: exact AutomationId then exact name
+    for strings, or every supplied selector field matched exactly;
     a miss, a tie or an incomplete tree refuses before the provider is touched.
     """
     before = win32.foreground()
@@ -696,9 +736,11 @@ def invoke_pattern(hwnd: int, pattern: str, target: str,
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) \
             or not 1 <= timeout_ms <= 30000:
         return _fail("invalid arguments", "timeout_ms must be 1..30000", before)
-    if not isinstance(allow_foreground, bool) or not isinstance(target, str):
-        return _fail("invalid arguments", "target must be a string and allow_foreground a bool",
-                     before)
+    if not isinstance(allow_foreground, bool):
+        return _fail("invalid arguments", "allow_foreground must be a bool", before)
+    error = tree.target_error(target)
+    if error:
+        return _fail("invalid target", error, before)
     bad_args = _argument_error(args)
     if bad_args:
         return _fail("invalid arguments", bad_args, before)

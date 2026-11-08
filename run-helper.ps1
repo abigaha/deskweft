@@ -1,4 +1,4 @@
-# Launch the helper with logs. Used by the winmcp-helper scheduled task.
+# Launch the helper with logs. Used by the deskweft-helper scheduled task.
 #
 # Start-Process with redirects is deliberate: under Task Scheduler there is no
 # console, and a process writing to an invalid stderr handle dies before it
@@ -12,7 +12,7 @@ $err = Join-Path $Root "helper.err.log"
 "--- start $(Get-Date -Format s) ---" | Out-File -FilePath $log -Append -Encoding utf8
 
 $p = Start-Process -FilePath (Join-Path $Root ".venv\Scripts\python.exe") `
-    -ArgumentList "-m", "winmcp.server" `
+    -ArgumentList "-m", "deskweft.server" `
     -WorkingDirectory $Root `
     -WindowStyle Hidden `
     -RedirectStandardOutput $out `

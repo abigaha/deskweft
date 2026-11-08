@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest import mock
 
-from winmcp import act, tree
+from deskweft import act, tree
 from test_tree import FakeElement, FakeRect
 
 

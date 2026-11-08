@@ -1,12 +1,14 @@
-# winmcp
+# DeskWeft
 
-A window-addressed desktop control MCP server for Windows that **never takes
-the foreground**.
+A Windows automation framework combining a skill, local app/version memory,
+and a controlled, window-addressed MCP execution layer.
 
-The core promise: it addresses one window by handle, acts through Win32
-messages and UIA patterns, and never moves your cursor or steals your focus.
-When an action genuinely needs the foreground, it refuses and returns a
-`needs_permission` result instead of doing it — the caller must ask you first.
+The skill guides exploration, route selection, validation and recovery. Memory
+keeps observations and reusable plans with their evidence and trust state. The
+MCP layer targets windows by handle, validates requests and runs UIA work in a
+bounded worker. Background execution requires protection verified for the
+current target and method; provider calls can activate windows. Foreground
+routes require authorization covering the action.
 
 ## Why not patch window-mcp
 
@@ -41,7 +43,7 @@ counterexample belongs in memory with `uses_foreground=true`.
 
 ## Tools
 
-Eight address a window; seven carry knowledge and the generic routes.
+Sixteen tools cover windows, generic queries, item-container enumeration and memory.
 
 **Reading and acting on one window**
 
@@ -53,10 +55,16 @@ Eight address a window; seven carry knowledge and the generic routes.
   native child control handles, and the diagnostics (`timed_out`,
   `limit_reached`, `identity_complete`, `tree_diagnostics`) that say whether the
   read was complete
+- `find_items(hwnd, target="", property_id=0, value=null, start_index=0,
+  max_items=100, timeout_ms=8000)` — bounded ItemContainer queries, including
+  items outside the visible tree. NULL and continuation references stay inside
+  one worker call; results are plain metadata, with paging and completeness
+  diagnostics. It calls no Realize, scrolling, selection or focus operation
 - `click(hwnd, target)` — a uniquely matching native control takes a window
   message and reports `delivery="queued"`; anything else needs `allow_foreground`.
   A missing, ambiguous or incompletely read target is refused — it never clicks
-  the window centre or picks the first lookalike
+  the window centre or picks the first lookalike. `target` accepts the existing
+  string form or the exact selector below
 - `type_text(hwnd, target, text)` — `WM_SETTEXT` first, verified by read-back
   (`effect_verified`, or `text readback mismatch`)
 - `key(hwnd, keys)` — keystrokes; always needs the foreground, and only when the
@@ -75,7 +83,9 @@ Eight address a window; seven carry knowledge and the generic routes.
   Members on the explicit read-only table run in the background; everything else
   needs `allow_foreground`. Results are projected to plain data: a TextRange
   becomes bounded text, a Control becomes its metadata, and an object without a
-  projection is reported as `result unsupported` rather than dropped
+  projection is reported as `result unsupported` rather than dropped. This
+  includes background queries of Legacy `Name` / `Description` / `Value` and
+  Window `WindowVisualState`; unknown members and setters still need permission
 - `post_message(hwnd, msg, ...)` — raw window messages: `wait=true` sends with
   `SendMessageTimeoutW` and returns the message's own signed result, `wait=false`
   queues with `PostMessageW` and reports only `queued`. `WM_GETTEXT`/`WM_SETTEXT`
@@ -99,6 +109,59 @@ Eight address a window; seven carry knowledge and the generic routes.
   Both take the `expected_revision` you showed the user, so a plan that changed
   underneath returns `stale plan` instead of inheriting an old confirmation
 
+### Exact target selectors
+
+`click`, `type_text`, `scroll`, `invoke_pattern` and `find_items` accept a selector object:
+
+```json
+{"automation_id": "search", "control_type": "EditControl", "rect": [120, 80, 300, 28]}
+```
+
+The only fields are `name`, `automation_id`, `control_type` (strict strings),
+`native_hwnd` (a positive strict integer), and `rect` (four strict integers in
+screen `[x, y, width, height]` form, with positive width and height). Include at
+least one nonempty string identity or `native_hwnd`; a rectangle alone is
+refused. Unknown fields, `nth`, index selectors and substring selectors are
+refused. Every supplied field must match exactly, with case preserved, on one
+unique element in the current complete tree. Use `see.elements[].control_type`
+for the control type. An unreadable required field, incomplete tree, changed
+rectangle, missing control or ambiguity refuses the action before it starts.
+Readable anonymous nodes remain candidates even when their seven common pattern
+probes are empty; omitting them could make a type selector appear falsely unique.
+Keeping those nodes can reach the tree limit sooner; an incomplete read still
+refuses the action, and selectors do not imply an automatic speedup.
+
+Structured click/type targets resolve all predicates first. A verified matching
+native child HWND with an allowed control class can use the existing background
+message route; other targets keep the UIA permission gate. Selectors carry plain
+data across the worker boundary and retain no cached UIA objects. Existing
+string matching stays unchanged, including `invoke_pattern`'s exact-only string
+matching and its explicit `target=""` root-window form.
+
+### Querying item containers
+
+`find_items` uses `property_id=0,value=null` to enumerate a provider sequence;
+positive property IDs accept a strict bool, int32, finite float or string up to
+6000 characters. For example, after confirming the actual window/container:
+
+```json
+{"hwnd":123456,"target":{"automation_id":"members"},"property_id":0,"value":null,"start_index":0,"max_items":100,"timeout_ms":8000}
+```
+
+`start_index` skips matches, and each page rescans from NULL. Inspect `items`,
+`read_errors`, `metadata_complete`, `result_truncated`, `has_more` and
+`next_start_index`. `snapshot` is always false. `complete` requires offset zero,
+an explicit provider end, and lossless metadata; a later page's `reached_end`
+only describes that suffix. Compare overlapping pages and an independent
+business total before claiming coverage. Provider order can change, equal data
+items can be skipped, and runtime IDs are only evidence of identity/cycles in
+the current enumeration, not stable cross-page keys. Duplicate names are kept.
+
+The generic `invoke_pattern.args` contract still rejects null list items and
+arbitrary Control references. `find_items` is the dedicated adaptation for this
+container query. See the [implementation contract](docs/specs/2026-11-08-implementation-handoff.md)
+for limits, result fields and failure semantics.
+
 ### What "success" means
 
 `returned`, `queued`, `call_completed` and a pattern's `False` all mean only that
@@ -112,8 +175,23 @@ before doing anything else, and never resend a write or a click automatically.
 `skills/windows-app-automation/SKILL.md` is a single self-contained skill for
 choosing a route across native controls, UIA/Legacy, Electron, UWP/WinUI,
 self-drawn interfaces and virtualised lists — including the failure branches and
-the directions nobody has tried yet. It stores no per-application facts: those
-belong in memory, per version.
+the directions nobody has tried yet. Its historical starting observations stay
+explicitly labelled; new application facts belong in memory, per version.
+
+The skill compares the current baseline with plausible alternatives using the
+whole cost of locating, invoking and verifying an effect. Memory `rank` records
+trust, not efficiency. It supplies concrete routes: native child text/status
+queries, direct root-pattern reads when the root owns the content, Value/Text/
+Legacy cross-checks, Selection/Grid metadata, list search/pagination/export,
+official APIs/CLIs, UWP content hosts and controlled Electron launch comparisons.
+Each route explains its trigger, operation, verification and permission or
+adapter gap. An available route is checked against the actual task and total
+cost; the skill does not claim an unmeasured speedup.
+
+One stalled scrolling loop produces a partial result and ends that loop;
+discovery continues through relevant remaining routes. Record the reason for
+each untried, blocked or deferred alternative. This requires neither brute-force
+experimentation nor automatic replay or unauthorized application restarts.
 
 ### The permission gate
 
@@ -139,24 +217,40 @@ focus was never taken in between, and it never replaces asking first.
 
 ## Install
 
+DeskWeft was previously named `winmcp`. New installations use the `deskweft`
+package, CLI and client registration, and the `deskweft-helper` scheduled task.
+During migration, replace the old task and registration so only one service
+writes the memory store.
+
+Memory resolves `DESKWEFT_MEMORY_DIR`, then the legacy `WINMCP_MEMORY_DIR`, then
+`%LOCALAPPDATA%\winmcp\memory`. The old default data path is intentional: this
+rename does not move or rewrite existing records. Historical live reports keep
+their original commands, paths and source hashes; naming changes require new
+offline and deployment checks and do not repeat those GUI measurements.
+
 ```powershell
-git clone <this repo> $env:LOCALAPPDATA\winmcp
-cd $env:LOCALAPPDATA\winmcp
+git clone https://github.com/abigaha/deskweft.git $env:LOCALAPPDATA\deskweft
+cd $env:LOCALAPPDATA\deskweft
 uv venv .venv --python 3.14
 uv pip install --python .venv\Scripts\python.exe "windows-mcp==0.8.8"
 uv pip install --python .venv\Scripts\python.exe -e .
 pwsh -File .\install.ps1     # registers the logon task, starts the server
 ```
 
-The server listens on `http://127.0.0.1:8765/mcp`.
+The installer waits up to 30 seconds for a single local listener and verifies
+that it belongs to this installation. The server listens on
+`http://127.0.0.1:8765/mcp`; task registration alone does not prove readiness.
 
 Register it in a client, e.g. Codex `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.winmcp]
+[mcp_servers.deskweft]
 url = "http://127.0.0.1:8765/mcp"
 required = false
 ```
+
+Reload existing client sessions to pick up the renamed registration and
+synchronized skill.
 
 ### If `PrintWindow` returns blank frames
 
@@ -183,11 +277,14 @@ diagnosis.
 ## Self-check
 
 ```powershell
-cd $env:LOCALAPPDATA\winmcp
-.venv\Scripts\python.exe -m winmcp.check
+cd $env:LOCALAPPDATA\deskweft
+.venv\Scripts\python.exe -m deskweft.check
 ```
 
-36 assertions. It creates its own window, so it never touches yours.
+This interactive diagnostic launches a synthetic fixture and supported apps.
+Cleanup is limited to windows whose ownership is verified; skipped or
+unconfirmed cases are reported. The GUI self-check was not run as part of
+the rename.
 
 ## Known limits
 
@@ -240,7 +337,7 @@ Two flags stop it, and either one alone is enough:
 backgrounded QQ reads 132 elements on every poll while your editor keeps the
 foreground.
 
-### Clicks that never steal the foreground
+### Historical QQ click routes
 
 UIA `InvokePattern` on Chromium goes through IA2, which focuses the widget and
 takes the foreground. `LegacyIAccessible.DoDefaultAction` does the same work
@@ -252,9 +349,12 @@ through MSAA and leaves focus alone. Measured on the same backgrounded window:
 | `InvokePattern` | no | no | **yes** |
 | posted `WM_LBUTTONDOWN` to render host | no | no | no |
 
-So `click()` tries the legacy route first, before touching the window's
-activation state at all. Only if that finds no target does it bring the window
-forward and fall back to the modern patterns.
+After native matching, `click()` tries the Legacy route only after
+`allow_foreground` is authorized. The current default background route is a
+verified native control message. The table is a historical QQ observation, not
+a guarantee that Legacy never takes focus. Once an action may have run, failure
+returns its actual state for verification; it does not automatically try another
+write or click route.
 
 ### False successes this tool had to fix
 
@@ -265,15 +365,37 @@ guarded, and the lesson is in the code:
   `GetForegroundWindow` points at it, but the screen does not change. Guarded by
   also requiring `IsWindowVisible` and `not IsIconic`.
 - **`ValuePattern.SetValue` on a Chromium input returns silently** and stores
-  nothing. Guarded by reading the value back and falling back to
-  click-then-type.
+  nothing. Guarded by reading the value back. A mismatch or unavailable read-back
+  is reported for verification; it does not automatically replay the input.
 - **`PostMessage(BM_CLICK)` to a render host returns 1** and does nothing. Guarded
   by only messaging real button classes.
 
+The original ItemContainer gap came from `invoke_pattern` rejecting NULL and
+Control-reference inputs. The dedicated `find_items` route now handles both
+inside one call. Arbitrary Control inputs to other generic members remain
+unsupported; projected metadata is not a reusable element handle.
+
 ## Real-world testing
 
-128 assertions across seven suites, against real applications — Notepad, Paint,
+On November 8, 2026, separate live `find_items` tests matched 300 synthetic WPF
+items (including 12 duplicate labels) and 150 Explorer files against independent
+fixture data, using overlapping pages. WPF preserved readable names and IDs
+despite offscreen-property errors; Explorer returned all sampled metadata.
+These used an in-process MCP client, a real worker and Windows providers, rather
+than HTTP or the installed service. See the [ItemContainer live report](docs/reports/2026-11-08-itemcontainer-live.md)
+for timings, the observed RuntimeId changes, timeout recovery and evidence limits.
+
+The [QQ / WeChat live report](docs/reports/2026-11-08-qq-wechat-live.md)
+separates successful navigation and search from foreground effects, failed
+protection attempts, private-desktop experiments, and incomplete data coverage.
+It records complete measured request costs and identifies unmeasured setup and
+cleanup costs; the historical results below remain a separate record.
+
+Historical report: 128 assertions, described at the time as seven suites,
+against real applications — Notepad, Paint,
 VS Code, Explorer, Calculator, Notepad++, and a live browser session.
+The table actually lists nine suites. These results and the browser/form account
+below are preserved history; this correction adds no new live measurements.
 
 | Suite | Covers | Result |
 |---|---|---|

@@ -1,4 +1,4 @@
-"""The shipped skill: one file, self-contained, with every route the contract names."""
+"""The shipped skill and its reachable resources preserve the automation contract."""
 
 from __future__ import annotations
 
@@ -51,6 +51,29 @@ class TestSkillFile(unittest.TestCase):
     def test_it_separates_rank_from_permission(self):
         self.assertIn("reviewed/proven 不是本次业务操作授权", self.text)
 
+    def test_four_tiers_prioritize_background_over_speed(self):
+        # A fast foreground route must never jump ahead of a slow background one.
+        tiers = re.findall(r"^\d+\. \*\*(后台高效|后台低效|前台高效|前台低效)\*\*", self.text, re.M)
+        self.assertEqual(tiers, ["后台高效", "后台低效", "前台高效", "前台低效"])
+
+    def test_background_trial_requires_prevention_before_calling(self):
+        for rule in ("调用前先阻止应用抢前台", "allow_foreground=true 不是防抢焦保护",
+                     "不发出潜在抢焦动作", "继续其他后台只读候选"):
+            self.assertTrue(rule in self.text, f"missing policy rule: {rule}")
+
+    def test_restoring_focus_and_matching_endpoints_do_not_prove_background(self):
+        for rule in ("先抢焦再切回", "before==after", "两个采样端点",
+                     "不能证明全程前台未变", "uses_foreground=true"):
+            self.assertTrue(rule in self.text, f"missing policy rule: {rule}")
+
+    def test_cost_comparison_and_downgrade_stay_within_the_policy(self):
+        for rule in ("只在同层", "完整成本", "降级理由", "保护安装", "异步"):
+            self.assertTrue(rule in self.text, f"missing policy rule: {rule}")
+
+    def test_all_eleven_diagnostic_routes_survive(self):
+        numbers = re.findall(r"^### (\d+)\. ", self.text, re.M)
+        self.assertEqual(numbers, [str(number) for number in range(1, 12)])
+
     def test_it_distinguishes_completion_from_effect(self):
         self.assertIn("执行完成", self.text.replace("调用完成", "执行完成"))
         self.assertIn("effect", self.text.lower()) if "effect" in self.text.lower() else None
@@ -75,9 +98,31 @@ class TestSkillDiscovery(unittest.TestCase):
         self.assertTrue(SKILL.is_file())
         self.assertEqual(SKILL.parent.name, "windows-app-automation")
 
-    def test_only_one_skill_file(self):
-        files = list(SKILL.parent.rglob("*"))
-        self.assertEqual([p for p in files if p.is_file()], [SKILL])
+    def test_foreground_protection_reference_is_discoverable(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertTrue("(references/foreground-protection.md)" in text,
+                        "foreground-protection reference is not linked from SKILL.md")
+        self.assertTrue((SKILL.parent / "references" / "foreground-protection.md").is_file())
+
+    def test_all_shipped_resources_are_reachable_inside_the_skill(self):
+        root = SKILL.parent.resolve()
+        pending = [SKILL]
+        reached = set()
+        while pending:
+            resource = pending.pop().resolve()
+            if resource in reached:
+                continue
+            reached.add(resource)
+            if resource.suffix != ".md":
+                continue
+            for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", resource.read_text(encoding="utf-8")):
+                if "://" in target or target.startswith(("#", "mailto:")):
+                    continue
+                linked = (resource.parent / target.split("#", 1)[0]).resolve()
+                self.assertTrue(linked.is_relative_to(root), f"resource escapes skill: {target}")
+                self.assertTrue(linked.is_file(), f"missing resource: {target}")
+                pending.append(linked)
+        self.assertEqual(reached, {path.resolve() for path in root.rglob("*") if path.is_file()})
 
 
 if __name__ == "__main__":

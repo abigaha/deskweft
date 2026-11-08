@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from winmcp import appinfo
+from deskweft import appinfo
 
 QQ_EXE = r"C:\Program Files\Tencent\QQ.exe"
 QQ_BUILD = r"C:\Program Files\Tencent\versions\9.9.22-40824"

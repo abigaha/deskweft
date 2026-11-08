@@ -1,6 +1,6 @@
 """Self-check: the claims the design rests on, measured rather than assumed.
 
-Run: .venv\\Scripts\\python.exe -m winmcp.check
+Run: .venv\\Scripts\\python.exe -m deskweft.check
 It builds its own window, so it never touches your real windows.
 """
 
@@ -18,7 +18,7 @@ from . import act, tree, win32
 APP = r"""
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.Form
-$f.Text = "WINMCP-CHECK"
+$f.Text = "DESKWEFT-CHECK"
 $f.Width = 460
 $f.Height = 320
 $b = New-Object System.Windows.Forms.Button
@@ -51,7 +51,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def find_check_window(pid: int) -> int | None:
     """Only our own window: a stale one from an earlier run would answer too."""
     for w in win32.list_windows():
-        if w["title"].startswith("WINMCP-CHECK") and w["pid"] == pid:
+        if w["title"].startswith("DESKWEFT-CHECK") and w["pid"] == pid:
             return w["hwnd"]
     return None
 
@@ -96,7 +96,7 @@ def main() -> int:
     # Run the test window inside its own temp dir: pwsh drops tmp*.ps1 next to
     # whatever the working directory is, and that debris must not land in the
     # project.
-    workdir = tempfile.mkdtemp(prefix="winmcp-check-")
+    workdir = tempfile.mkdtemp(prefix="deskweft-check-")
     script = os.path.join(workdir, "app.ps1")
     with open(script, "w", encoding="utf-8") as f:
         f.write(APP)
@@ -223,7 +223,7 @@ def main() -> int:
 
         import tempfile as _tempfile
 
-        with _tempfile.TemporaryDirectory(prefix="winmcp-mem-") as memdir:
+        with _tempfile.TemporaryDirectory(prefix="deskweft-mem-") as memdir:
             from pathlib import Path as _Path
             from unittest import mock as _mock
 

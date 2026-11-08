@@ -8,7 +8,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from winmcp import tree
+from deskweft import tree
 
 
 class FakeRect:
@@ -168,16 +168,16 @@ class TestReadDetailed(unittest.TestCase):
         self.assertFalse(got["identity_complete"])
         self.assertIsNotNone(got["elements"][0]["name"] if got["elements"] else None)
 
-    def test_anonymous_and_offscreen_counts_are_reported(self):
+    def test_anonymous_nodes_are_retained_and_offscreen_counts_are_reported(self):
         root = FakeElement(children=[
-            FakeElement(name=""),                       # anonymous, no patterns
+            FakeElement(name=""),                       # still addressable by type
             FakeElement(name="hidden", offscreen=True),  # filtered
             FakeElement(name="shown"),
         ])
         got = self.read(root)
-        self.assertEqual(got["tree_diagnostics"]["filtered_anonymous"], 1)
+        self.assertEqual(got["tree_diagnostics"]["filtered_anonymous"], 0)
         self.assertEqual(got["tree_diagnostics"]["filtered_offscreen"], 1)
-        self.assertEqual([e["name"] for e in got["elements"]], ["shown"])
+        self.assertEqual([e["name"] for e in got["elements"]], ["", "shown"])
 
     def test_limit_reached_is_reported(self):
         kids = [FakeElement(name=f"n{i}") for i in range(10)]

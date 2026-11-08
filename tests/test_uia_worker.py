@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest import mock
 
-from winmcp import uia_worker
+from deskweft import uia_worker
 
 
 class FakeChannel:

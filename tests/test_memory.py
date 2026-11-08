@@ -15,7 +15,7 @@ from unittest import mock
 
 import yaml
 
-from winmcp import memory
+from deskweft import memory
 
 QQ_BODY = """## 目标
 读取当前窗口已暴露的命名控件
@@ -64,12 +64,21 @@ class TestKeyAndPath(MemoryCase):
         # memory_root is the unpatched function here: these tests patch the
         # module attribute, so call the closure kept at import time instead.
         real = memory._real_memory_root
-        with mock.patch.dict(os.environ, {"WINMCP_MEMORY_DIR": str(self.root / "chosen")}):
+        with mock.patch.dict(os.environ, {"WINMCP_MEMORY_DIR": str(self.root / "chosen"),
+                                         "DESKWEFT_MEMORY_DIR": ""}):
             self.assertEqual(real(), self.root / "chosen")
         env = dict(os.environ)
         env.pop("WINMCP_MEMORY_DIR", None)
+        env.pop("DESKWEFT_MEMORY_DIR", None)
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(real(), Path(os.environ["LOCALAPPDATA"]) / "winmcp" / "memory")
+
+    def test_new_memory_override_takes_priority_over_legacy_override(self):
+        with mock.patch.dict(os.environ, {
+            "DESKWEFT_MEMORY_DIR": str(self.root / "new"),
+            "WINMCP_MEMORY_DIR": str(self.root / "legacy"),
+        }):
+            self.assertEqual(memory._real_memory_root(), self.root / "new")
 
     def test_bad_app_and_version_are_rejected(self):
         for app in ("", "  ", "a@b", "a/b", "a\\b", "a\x00b", "a\nb"):

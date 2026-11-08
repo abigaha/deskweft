@@ -10,15 +10,31 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from typing import Annotated, TypedDict
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
-from pydantic import StrictBool, StrictInt, StrictStr
+from mcp.types import TextContent
+from pydantic import ConfigDict, Field, StrictBool, StrictInt, StrictStr, with_config
 
 from . import appinfo, launch as _launch_module, memory, uia_worker, win32
 
 # Bound at import time so tests can replace one name instead of the module.
 _launch = _launch_module.launch
+
+
+@with_config(ConfigDict(extra="forbid"))
+class Selector(TypedDict, total=False):
+    """All supplied fields must match one current control exactly."""
+
+    name: StrictStr
+    automation_id: StrictStr
+    control_type: StrictStr
+    native_hwnd: Annotated[StrictInt, Field(gt=0)]
+    rect: Annotated[list[StrictInt], Field(min_length=4, max_length=4)]
+
+
+Target = StrictStr | Selector
 
 INSTRUCTIONS = """\
 Window-addressed desktop control for Windows. Never takes the foreground unless
@@ -40,10 +56,19 @@ Reading is free, acting is not:
     must agree to first. A missing, ambiguous or incompletely read target is
     refused - the tool never clicks the window centre or picks the first
     lookalike.
+    target also accepts a selector object: name, automation_id, control_type,
+    native_hwnd and rect [x,y,width,height]. All fields match exactly together;
+    require at least one non-empty identity field or positive native_hwnd.
+    rect is an additional filter, never a standalone coordinate click. A
+    structured native target must first resolve uniquely in the complete tree.
   - invoke_pattern(hwnd, pattern, target, method, args) reaches members the
     fixed tools do not cover. Members on the read-only table work in the
     background; anything else needs allow_foreground=true. A Get prefix is not
     proof of safety.
+  - find_items(hwnd, target, ...) traverses ItemContainer inside one worker
+    call, including virtualized items. Use property_id=0/value=null for all.
+    Inspect reached_end, read_errors and truncation; pages rescan a live query,
+    so compare independent IDs and known counts. RuntimeId is not a durable key.
   - post_message(hwnd, msg, ...) is the raw window-message route: wait=true for
     SendMessageTimeoutW, wait=false to queue with PostMessageW. WM_GETTEXT and
     WM_SETTEXT are marshalled for you; WM_SETTEXT is verified by reading back in
@@ -58,8 +83,9 @@ before deciding anything; do not resend automatically.
 Chromium/Electron applications (QQ, VS Code, Slack, Discord, Teams) keep their
 accessibility tree off until it is asked for at launch. open_app(...,
 accessibility=true) passes the flags that turn it on and keep it alive while
-another window is in front. A tree of empty PaneControls means the app was
-started without them. Re-running open_app does not restart an existing single-
+another window is in front. Empty PaneControls can be a clue to missing flags,
+occlusion, a wrong host or a provider failure; check the evidence. Re-running
+open_app does not restart an existing single-
 instance app, so its flags may never apply - check the process instead of
 retrying.
 
@@ -88,7 +114,7 @@ async def _shutdown() -> None:
     uia_worker.close()
 
 
-mcp = FastMCP(name="winmcp", instructions=INSTRUCTIONS, lifespan=_lifespan,
+mcp = FastMCP(name="deskweft", instructions=INSTRUCTIONS, lifespan=_lifespan,
               strict_input_validation=True)
 
 
@@ -101,9 +127,13 @@ def _foreground() -> dict:
 
 def _worker_call(action: str, parameters: dict, timeout_ms: int) -> dict:
     """The single path from a tool to UIA. Adds the shared foreground sample."""
+    before = win32.foreground()
     result = uia_worker.call(action, parameters, timeout_ms)
     if isinstance(result, dict):
-        result.update(_foreground())
+        # Worker observations surround the action; replacing them loses evidence.
+        result.setdefault("foreground_before", before)
+        result.setdefault("foreground_after", win32.foreground())
+        result["foreground_changed"] = result["foreground_before"] != result["foreground_after"]
     return result
 
 
@@ -136,7 +166,7 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
     if result.get("hidden_windows"):
         result["hint"] = (
             "Windows are hidden. Use see(hwnd) to inspect one, or reveal(hwnd) "
-            "to show it - reveal moves the foreground, so ask first."
+            "to show it - reveal moves the foreground and needs the user's authorization."
         )
     result.update(_foreground())
     return result
@@ -146,8 +176,8 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
 def reveal(hwnd: StrictInt) -> dict:
     """Put a hidden window on screen. This DOES take the foreground.
 
-    Ask the user before calling this: it is the one operation that changes what
-    they are looking at.
+    This explicitly restores a hidden window. Use the user's existing
+    authorization when it covers this action; otherwise ask before calling.
     """
     if not win32.title(hwnd) and not win32.class_name(hwnd):
         return {"ok": False, "reason": "no such window", "detail": f"hwnd {hwnd} is gone"}
@@ -192,25 +222,25 @@ def see(hwnd: StrictInt, with_tree: StrictBool = False, timeout_ms: StrictInt = 
                                   "max_elements": max_elements},
                           max(3000, timeout_ms + 1000))
     if not isinstance(result, dict) or not result.get("ok"):
-        return [json.dumps(result if isinstance(result, dict) else
-                           {"ok": False, "reason": "worker result invalid"}, ensure_ascii=False)]
+        return [TextContent(type="text", text=json.dumps(
+            result if isinstance(result, dict) else
+            {"ok": False, "reason": "worker result invalid"}, ensure_ascii=False))]
     meta = result["meta"]
     # see returns content blocks rather than a dict, so the shared foreground
     # sample has to be merged into meta - the one place it can survive.
     for field in ("foreground_before", "foreground_after", "foreground_changed"):
         if field in result:
             meta[field] = result[field]
-    # Text first, image second: FastMCP only turns Image instances into image
-    # content blocks when they sit beside plain text, not beside a dict.
-    response: list = [json.dumps(meta, ensure_ascii=False)]
+    # An explicit block prevents FastMCP serializing a text-only list as an array.
+    response: list = [TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
     if result.get("png"):
         response.append(Image(data=result["png"], format="png"))
     return response
 
 
 @mcp.tool
-def click(hwnd: StrictInt, target: StrictStr = "", allow_foreground: StrictBool = False) -> dict:
-    """Click one named control.
+def click(hwnd: StrictInt, target: Target = "", allow_foreground: StrictBool = False) -> dict:
+    """Click one uniquely named control or exact composite selector.
 
     A uniquely matching native control takes a window message (measured 0.0 ms,
     foreground untouched) and reports delivery="queued" - the click still has to
@@ -225,9 +255,9 @@ def click(hwnd: StrictInt, target: StrictStr = "", allow_foreground: StrictBool 
 
 
 @mcp.tool
-def type_text(hwnd: StrictInt, target: StrictStr = "", text: StrictStr = "",
+def type_text(hwnd: StrictInt, target: Target = "", text: StrictStr = "",
               allow_foreground: StrictBool = False) -> dict:
-    """Write text into one named control.
+    """Write text into one uniquely named control or exact composite selector.
 
     A uniquely matching native editor takes WM_SETTEXT and is verified by
     reading the text back; effect_verified says whether it matched. Anything
@@ -253,7 +283,7 @@ def key(hwnd: StrictInt, keys: StrictStr = "", allow_foreground: StrictBool = Fa
 
 
 @mcp.tool
-def scroll(hwnd: StrictInt, target: StrictStr = "", direction: StrictStr = "down",
+def scroll(hwnd: StrictInt, target: Target = "", direction: StrictStr = "down",
            allow_foreground: StrictBool = False) -> dict:
     """Scroll one control with UIA's ScrollPattern.
 
@@ -284,7 +314,32 @@ def app_info(hwnd: StrictInt) -> dict:
 
 
 @mcp.tool
-def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: StrictStr,
+def find_items(hwnd: StrictInt, target: Target = "", property_id: StrictInt = 0,
+               value: StrictBool | StrictInt | Annotated[float, Field(strict=True, allow_inf_nan=False)] | StrictStr | None = None,
+               start_index: StrictInt = 0, max_items: StrictInt = 100,
+               timeout_ms: StrictInt = 8000) -> dict:
+    """Query ItemContainer with NULL start and worker-local element continuation.
+
+    property_id=0/value=null enumerates all; otherwise pass a property ID and
+    bool/int32/finite float/string (Name=30005, AutomationId=30011,
+    IsSelected=30079). Unsupported properties produce provider errors.
+    max_items is 1..100; start_index is 0..10000 in the MATCHING sequence.
+    Each page rescans a live list, not a snapshot; compare overlapping pages
+    and known counts before claiming full coverage. Duplicate names survive.
+    complete requires start_index=0, explicit provider end and lossless metadata.
+    reached_end alone only proves the queried suffix ended. Inspect read_errors,
+    result_truncated, has_more and next_start_index. COM references never leave
+    the worker. No Realize, selection, scrolling or focus operation is called.
+    The parent deadline can discard a stuck worker; timeout state is unknown.
+    """
+    return _worker_call("find_items", {"hwnd": hwnd, "target": target,
+                        "property_id": property_id, "value": value,
+                        "start_index": start_index, "max_items": max_items,
+                        "timeout_ms": timeout_ms}, timeout_ms)
+
+
+@mcp.tool
+def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: Target,
                    method: StrictStr, args: list | None = None,
                    allow_foreground: StrictBool = False,
                    timeout_ms: StrictInt = 8000) -> dict:
@@ -292,7 +347,8 @@ def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: StrictStr,
 
     method is a public member path: "Value", "GetSelection",
     "DocumentRange.GetText". The last part is called when it is a method and
-    read when it is a property. args holds finite JSON scalars only.
+    read when it is a property. args holds bool/int/finite float/str only;
+    null inside the list is refused. args=null means no arguments.
 
     Members on the read-only table run in the background; every other member
     needs allow_foreground=true first. That table is explicit - a Get prefix is
@@ -300,7 +356,7 @@ def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: StrictStr,
     belongs in memory with uses_foreground=true.
 
     target="" means the window's root element. Any other target must resolve to
-    exactly one control by exact AutomationId or exact name, from a complete
+    exactly one control by exact AutomationId/name or all selector fields, from a complete
     tree; a miss, a tie or an incomplete tree refuses before the provider is
     called. Results are plain data: a TextRange becomes bounded text, a Control
     becomes its metadata, and an unsupported object is reported as

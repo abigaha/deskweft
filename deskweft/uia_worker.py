@@ -32,7 +32,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 STARTUP_MS = 5000
 CLOSE_GRACE_MS = 1000
 
-_ACTIONS = ("see", "click", "type_text", "key", "scroll", "invoke_pattern")
+_ACTIONS = ("see", "click", "type_text", "key", "scroll", "invoke_pattern", "find_items")
 
 _stopping = threading.Event()
 _lock = threading.Lock()
@@ -171,7 +171,7 @@ def _decode_result(result: dict) -> dict:
 
 
 def _make_dispatch() -> dict:
-    from . import act, tree
+    from . import act, items, tree
 
     return {
         "see": _see,
@@ -186,6 +186,7 @@ def _make_dispatch() -> dict:
             act.act(hwnd, "scroll", target=target, text=direction,
                     allow_foreground=allow_foreground),
         "invoke_pattern": act.invoke_pattern,
+        "find_items": items.find_items,
     }
 
 
