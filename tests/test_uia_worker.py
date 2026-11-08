@@ -326,6 +326,54 @@ class TestStartup(WorkerCase):
         self.assertTrue(result["retry_safe"])
         self.assertIsNone(uia_worker._unavailable)
 
+    def test_an_undead_worker_during_startup_makes_the_service_sticky(self):
+        """A startup child that survives terminate+kill must not be rebuilt.
+
+        The failure arrives through _spawn, not _discard, so the survival flag
+        has to be honoured there too - otherwise every retry starts another
+        wedged process.
+        """
+        proc = mock.Mock()
+        proc.is_alive.return_value = True
+
+        class FakeContext:
+            def Process(self, **kwargs):
+                return proc
+
+        with mock.patch.object(uia_worker.multiprocessing, "get_context",
+                               return_value=FakeContext()), \
+             mock.patch.object(uia_worker, "_recv_frame",
+                               return_value={"transport_ready": True}), \
+             mock.patch.object(uia_worker, "_reap", return_value=(1.0, True)) as reap:
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertTrue(reap.called)
+        self.assertIsNotNone(uia_worker._unavailable,
+                             "a startup survivor must make the service sticky")
+        self.assertFalse(first["ok"])
+        with mock.patch.object(uia_worker, "_spawn") as spawn:
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertEqual(second["reason"], "worker unavailable")
+        spawn.assert_not_called()
+
+    def test_a_startup_failure_with_a_clean_reap_is_retryable(self):
+        """The counterpart: a child that really died must not disable the service."""
+        proc = mock.Mock()
+        proc.is_alive.return_value = False
+
+        class FakeContext:
+            def Process(self, **kwargs):
+                return proc
+
+        with mock.patch.object(uia_worker.multiprocessing, "get_context",
+                               return_value=FakeContext()), \
+             mock.patch.object(uia_worker, "_recv_frame",
+                               return_value={"transport_ready": True}), \
+             mock.patch.object(uia_worker, "_reap", return_value=(1.0, False)):
+            result = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(uia_worker._unavailable)
+        self.assertTrue(result["retry_safe"])
+
     def test_close_is_idempotent(self):
         uia_worker.close()
         uia_worker.close()

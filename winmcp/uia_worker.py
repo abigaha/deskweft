@@ -375,12 +375,25 @@ def _spawn() -> dict:
                 "transport_ready": True, "start_ms": start_ms,
                 "startup_ms": round((time.monotonic() - started) * 1000, 1)}
     except StartupFailure:
-        _reap(proc, parent)
+        _startup_reap(proc, parent)
         raise
     except Exception as error:
-        _reap(proc, parent)
+        _startup_reap(proc, parent)
         raise StartupFailure(f"{type(error).__name__}: {error}",
                              transport_ready=handoff) from None
+
+
+def _startup_reap(proc, channel) -> None:
+    """Reclaim a half-built worker, and refuse to retry if it would not die.
+
+    The same rule as _discard: one wedged child is a failure to report, not a
+    process to replace. A retry here would start another one.
+    """
+    global _unavailable
+    _, alive = _reap(proc, channel)
+    if alive:
+        _unavailable = ("worker unavailable: a starting worker survived "
+                        "terminate and kill")
 
 
 def _reap(proc, channel) -> tuple[float, bool]:
