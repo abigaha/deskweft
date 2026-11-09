@@ -3,7 +3,17 @@
 # Start-Process with redirects is deliberate: under Task Scheduler there is no
 # console, and a process writing to an invalid stderr handle dies before it
 # opens the port. Files give it real handles.
+#
+# The package comes from an editable install pointing at the repo. Do not drop a
+# deskweft/ directory here: $Root is the working directory, so a copy would win
+# over the install and every code change would appear to do nothing.
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$stray = Join-Path $Root "deskweft"
+if (Test-Path $stray) {
+    "WARNING: $stray shadows the editable install; move it away" |
+        Out-File -FilePath (Join-Path $Root "helper.log") -Append -Encoding utf8
+}
 
 $log = Join-Path $Root "helper.log"
 $out = Join-Path $Root "helper.out.log"

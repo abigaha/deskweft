@@ -1839,6 +1839,28 @@ try {
 
 若导入不指向工作仓库，先检查实际导入路径和任务工作目录中的`deskweft/`，并检查是否仍有旧`winmcp/`安装或任务。备份该副本后调整任务工作目录至仓库，或移走已确认过时的副本；只重新安装 editable 不能消除当前目录的遮蔽。随后在目标 venv 安装该仓库及声明依赖，并从实际任务工作目录复核导入路径。
 
+#### 7.0.1 部署目录不得持有代码副本（2026-11-09 实测）
+
+改名后的部署目录曾同时存在**两份**非仓库代码，两者都会让"改代码→重启服务"看起来无效：
+
+| 位置 | 来源 | 后果 |
+|---|---|---|
+| `%LOCALAPPDATA%\deskweft\deskweft\` | 从仓库复制 | cwd 优先，遮蔽 editable 安装 |
+| `%LOCALAPPDATA%\deskweft\.venv\Lib\site-packages\deskweft\` | 从 wheel 安装的快照 | 即使 cwd 干净，导入仍是旧代码 |
+
+实测表现：仓库已注册第 17 个工具 `forget`，重启服务后 `tools/list` 仍只有 16 个，且
+`server.py`/`memory.py` 与仓库逐文件比对不一致。清 `__pycache__` 无效，因为解释器
+从未读取仓库文件。
+
+处理（已完成）：两份副本移走（`deskweft.copysnapshot-*`，未删除）；对部署 venv 执行
+`uv pip install --python <部署venv> -e <仓库>`，改由 editable 指向仓库；重启后导入路径为
+`C:\...\source\winmcp\deskweft\__init__.py`，17 工具在线。
+
+**规则**：部署目录只放脚本、日志、venv 与 skills；`deskweft/` 包只能由 editable 安装
+指向仓库提供。改代码后只需重启服务，不需要同步任何副本。若再次出现"改了没生效"，
+按 `direct_url.json` 是否 `"editable": true`、`import deskweft; deskweft.__file__`
+是否落在仓库、以及 `site-packages` 是否存在实体 `deskweft/` 三项依次核对。
+
 当前`install.ps1`在交互登录会话注册`deskweft-helper`，任务动作是隐藏的`pwsh.exe -File run-helper.ps1`；runner再隐藏启动本目录venv的`python.exe -m deskweft.server`，将标准输出/错误分别写入`helper.out.log`和`helper.err.log`。安装器最多轮询30秒、间隔250ms，要求8765只有一个127.0.0.1监听，并核对owning PID的命令行属于本安装venv和`deskweft.server`；异常监听或超时返回错误，任务已注册不等于服务已就绪。runner另有的10秒日志状态采样不是MCP握手验收。
 
 改代码/依赖后需重启实际监听服务；同时检查 python.exe 和 pythonw.exe，仅停止确认属于该服务的 PID。用任务状态、8765 端口的拥有 PID、MCP 初始化与工具清单一起判断启动成功，不能只看端口计数。不要在交接脚本里自动 push、点击凭据账户或写本机代理。
