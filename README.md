@@ -21,6 +21,20 @@ that produced them.
 This tool changes the model: **address a single window by hwnd** and act with
 window messages and `PrintWindow`.
 
+### What the numbers in this README are, and are not
+
+Numbers below came from this machine on the date recorded, on one version of one
+application. They are observations, not guarantees:
+
+- a measured 504 ms `InvokePattern` does not mean every provider is slow, and a
+  measured no-focus change does not mean a provider never takes focus;
+- a working route for QQ does not transfer to another app or another version —
+  that is what per-version memory is for;
+- the two samples around a call (`foreground_before`/`after`) are two points in
+  time. They cannot prove focus was never taken in between.
+
+Read every figure as "here is what happened once, under these conditions".
+
 ## Measurements (on a normal Windows desktop)
 
 | Operation | Time | Takes foreground |
