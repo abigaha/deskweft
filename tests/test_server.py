@@ -25,16 +25,16 @@ async def list_tools():
 
 
 class TestSurface(unittest.TestCase):
-    def test_exactly_sixteen_tools(self):
+    def test_exactly_seventeen_tools(self):
         names = tool_names()
-        self.assertEqual(len(names), 16, names)
+        self.assertEqual(len(names), 17, names)
 
     def test_the_expected_names(self):
         names = set(tool_names())
         self.assertEqual(names, {
             "open_app", "reveal", "windows", "see", "click", "type_text", "key",
             "scroll", "app_info", "invoke_pattern", "find_items", "post_message", "recall",
-            "remember", "approve", "confirm_proven",
+            "remember", "approve", "confirm_proven", "forget",
         })
 
     def test_new_signatures_match_the_contract(self):

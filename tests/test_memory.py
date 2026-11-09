@@ -7,6 +7,7 @@ or open a window.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -127,8 +128,14 @@ class TestSchema(MemoryCase):
 
     def test_date_parsed_into_object_is_rejected(self):
         self.write_plans()
-        text = self.read_file().replace("updated: '2026-11-08'", "updated: 2026-11-08")
-        self.assertIn("updated: 2026-11-08", text)
+        # Take the real date from the record: the fixture is written with
+        # today's date, so hard-coding one makes the test fail tomorrow.
+        text = self.read_file()
+        quoted = re.search(r"updated: '(\d{4}-\d{2}-\d{2})'", text)
+        self.assertIsNotNone(quoted, text)
+        plain = quoted.group(1)
+        text = text.replace(f"updated: '{plain}'", f"updated: {plain}")
+        self.assertIn(f"updated: {plain}", text)
         memory.record_path(self.root, "qq@9.9.22").write_text(text, encoding="utf-8")
         result = memory.recall("qq@9.9.22")
         self.assertFalse(result["ok"])

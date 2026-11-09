@@ -647,3 +647,70 @@ def approve(app: str, version: str | None, plan_id: str, expected_revision: str,
 def confirm_proven(app: str, version: str | None, plan_id: str, expected_revision: str,
                    proven: bool = True) -> dict:
     return _set_trust(app, version, plan_id, expected_revision, "proven", proven)
+
+
+def forget(app: str, version: str | None, plan_id: str = "",
+           expected_revision: str = "", confirm: bool = False) -> dict:
+    """Delete a plan, or the whole record when the last plan goes.
+
+    Errors are worth keeping; a fact that is no longer true is not - recall would
+    hand it to the next caller as current. So this removes what was superseded,
+    never silently: the caller names the plan and the revision it was shown, the
+    same guard approve uses, and deleting a whole record needs confirm=true.
+    """
+    try:
+        app = _check_app(app)
+        version = _check_version(version)
+        if not isinstance(confirm, bool):
+            raise Invalid("invalid arguments", "confirm must be a bool")
+        if plan_id and not isinstance(expected_revision, str):
+            raise Invalid("invalid revision", "expected_revision is required")
+        if plan_id:
+            plan_id = _check_plan_id(plan_id)
+            if not expected_revision:
+                raise Invalid("invalid revision", "expected_revision is required")
+        elif not confirm:
+            raise Invalid("confirmation required",
+                          "deleting a whole record needs confirm=true")
+        key = make_key(app, version)
+        root = memory_root()
+        path = record_path(root, key)
+        with _write_lock:
+            record = _load_key(root, key)
+            if "see" in record:
+                raise Invalid("inherited record",
+                              "this record only points at another version; "
+                              "delete the stored version instead")
+            if plan_id:
+                plan = _match_plan(record, plan_id)
+                if plan is None:
+                    raise Invalid("plan not found", f"{key} has no plan {plan_id}")
+                if plan_revision(key, plan) != expected_revision:
+                    raise Invalid("stale plan",
+                                  "the plan changed since it was read; read it "
+                                  "again and re-confirm")
+                removed = [plan_id]
+                remaining = [p for p in record["plans"] if p["id"] != plan_id]
+            else:
+                removed = [p["id"] for p in record["plans"]]
+                remaining = []
+
+            if remaining:
+                record["plans"] = remaining
+                record["updated"] = _today()
+                _write(path, record)
+                return {"ok": True, "key": key, "removed": removed,
+                        "record_removed": False}
+            # Nothing left: remove the record itself, not an empty shell that
+            # recall would keep reporting as a key.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise Invalid("write failed",
+                              f"{type(error).__name__}: {error}") from None
+            return {"ok": True, "key": key, "removed": removed,
+                    "record_removed": True}
+    except Invalid as error:
+        return {"ok": False, "reason": error.reason, "detail": error.detail}

@@ -477,6 +477,25 @@ def confirm_proven(app: StrictStr, version: StrictStr | None, plan_id: StrictStr
     return memory.confirm_proven(app, version, plan_id, expected_revision, proven)
 
 
+@mcp.tool
+def forget(app: StrictStr, version: StrictStr | None, plan_id: StrictStr = "",
+           expected_revision: StrictStr = "", confirm: StrictBool = False) -> dict:
+    """Delete a plan that is no longer true, or a whole record.
+
+    Errors are evidence and should stay; a fact that has been superseded is not -
+    recall would hand it to the next caller as current. Deleting one plan needs
+    its id and the `expected_revision` you were shown, so a plan that changed
+    underneath returns "stale plan" instead of deleting newer content. Removing
+    the last plan removes the record, and an empty plan_id deletes the whole
+    record only with confirm=true.
+
+    An inherited record (`see`) cannot be deleted here: it is a pointer, and the
+    stored version it points at is what carries the content. This never touches
+    other versions or other applications.
+    """
+    return memory.forget(app, version, plan_id, expected_revision, confirm)
+
+
 def main() -> None:
     mcp.run(transport="streamable-http", host="127.0.0.1", port=8765, stateless_http=True)
 

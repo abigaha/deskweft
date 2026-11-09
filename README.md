@@ -108,6 +108,13 @@ Sixteen tools cover windows, generic queries, item-container enumeration and mem
   Reviewed means the user read the plan; proven means it repeated real successes.
   Both take the `expected_revision` you showed the user, so a plan that changed
   underneath returns `stale plan` instead of inheriting an old confirmation
+- `forget(app, version, plan_id, expected_revision, confirm)` — deletes a plan
+  that is no longer true. Errors are evidence and stay; a superseded fact does
+  not, because `recall` would otherwise hand it to the next caller as current.
+  Removing one plan needs its revision (the same guard `approve` uses); removing
+  the last plan removes the record, and an empty `plan_id` deletes the whole
+  record only with `confirm=true`. Inherited `see` records are pointers and are
+  refused here
 
 ### Exact target selectors
 

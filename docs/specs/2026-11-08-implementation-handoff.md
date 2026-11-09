@@ -211,6 +211,9 @@ def approve(app: str, version: str | None, plan_id: str, expected_revision: str,
 def confirm_proven(app: str, version: str | None, plan_id: str, expected_revision: str,
                    proven: bool = True) -> dict: ...
 
+def forget(app: str, version: str | None, plan_id: str = "",
+           expected_revision: str = "", confirm: bool = False) -> dict: ...
+
 def unresolved() -> list[dict]: ...
 ```
 
@@ -267,6 +270,26 @@ def unresolved() -> list[dict]: ...
 - 置 true 前调用方必须取得用户对该 key/id **当前内容**的明确确认；`confirm_proven` 还需已有多次成功的记录。本轮不自动计数，不因为 rank 高便自动确认。
 - `revision` 按下方函数从完整内容派生，不额外存盘。recall 的每条 plan、remember 和审核成功结果均返回它。审核输入 `expected_revision` 必填，在同一写锁内与当前 revision 比较，不一致返回 `stale plan` 且不改文件，调用方须重新读取并确认；继承结果只用于查看，不能直接审核。
 - 成功写返回 `{ok: true, key, plan_id, rank, revision}`；审核成功也返回当前 rank/revision。外部不接收 `reviewed/proven` 作为 remember 输入。
+
+### 2.6.1 删除过时方案
+
+记忆的用途是让下一次少走弯路，因此**过时信息必须可删**：留着它，`recall` 会把旧结论
+当成当前事实交给调用方，比没有记录更糟。与之相对，失败路径和未试方向属于证据，不删。
+
+- `forget(app, version, plan_id, expected_revision)` 删除一条方案：`plan_id` 与
+  `expected_revision` 均必填，在同一写锁内比较 revision，不一致返回 `stale plan` 且不改文件
+  ——与审核同一条规则，删除的是调用方看到的内容，不是后来替换掉的内容。
+- 删除后若 `plans` 为空，连记录文件一起删除，不留下 `recall` 仍会列出的空壳。
+- `plan_id` 为空表示删除整条记录，必须 `confirm=true`；缺省返回
+  `confirmation required`，不写盘。
+- 继承记录（`see`）不能删除：它是指针，内容在源记录里；返回 `inherited record`。
+  删除源记录不影响已指向它的其他 key，也不做级联。
+- 只影响目标 key：其他版本、其他应用、同名 key 的其他方案不动。损坏记录返回
+  `invalid record` 并保留原文件，不能靠删除跳过解析错误。
+- 写盘失败保留旧记录；删到空时的文件删除失败返回 `write failed`。
+- 成功返回 `{ok: true, key, removed: [id...], record_removed: bool}`。
+- 删除不可逆，且不进入 `## 更新记录`：需要保留"某结论被证伪"的说明时，先改正文再决定
+  是否删除该方案，不要用删除代替更正。
 
 ```python
 import json
@@ -1780,7 +1803,7 @@ false。受保护的新变体独立记录机制、环境、效果和观测证据
 2. 完成 app_info；实现 post_message 的同步标量、异步投递、托管 GET/SETTEXT 和同预算读回。先用 mock 验证参数、错误与指针宽度，不接触真实用户窗口。
 3. 完成 tree 的诊断入口/原生句柄、pattern 守卫、invoke_pattern 的属性链/投影；修正现有动作的歧义、中心点击、文本验证、滚动枚举、激活检查及启动窗口归属。测试所有拒绝分支在发送动作前发生。
 4. 完成 worker 的 spawn/握手、非阻塞帧、deadline、busy、异常回收、重建及 close。纯 IPC 测试使用测试模块的假 worker，不需要真正 UIA；再验证实际 MCP 包装全部经过 worker。
-5. 注册基础 7 个工具及本轮 find_items，核对 16 项工具的 schemas/HTTP 请求和生命周期；以 FastMCP lifespan 的 finally 调 uia_worker.close，确保停止服务会回收本服务 worker。加入完整独立 skill，更新 README/INSTRUCTIONS，删除过度诊断、默认后台 Legacy、所有 UIA 必夺焦和“用户离开就可执行”等失实描述。
+5. 注册基础 7 个工具及本轮 find_items，核对 16 项工具的 schemas/HTTP 请求和生命周期；以 FastMCP lifespan 的 finally 调 uia_worker.close，确保停止服务会回收本服务 worker。加入完整独立 skill，更新 README/INSTRUCTIONS，删除过度诊断、默认后台 Legacy、所有 UIA 必夺焦和“用户离开就可执行”等失实描述。后续按 §2.6.1 增补 `forget`，工具数为 17，需同时核对新工具的 schema、拒绝分支与真实 MCP 调用。
 6. **核验 check.py 测试清理**：当前实现已按本次启动PID、已记录HWND和`_close_owned`核对归属后清理，不再无条件关闭所有Notepad窗口。继续要求句柄/PID归属成立；无法确认单实例或broker窗口归属时，跳过相关应用用例并报告。本次改名未运行GUI自检，源码检查不代替真实清理与效果验收。
 7. 在隔离桌面或确认安全的会话运行 GUI 集成回归；最后才按已授权范围部署。
 
@@ -1859,6 +1882,7 @@ try {
 | 并发/失败 | 两线程同时追加不同 plan，两条都保留；mock os.replace 抛错，旧记录仍可读；冲突不改旧正文 |
 | 继承 | key 引用、只跟随一次；缺失/自引用/链式引用报错；有效 rank=0；显式 materialize 后与源独立 |
 | 缺口 | 由 remember 的真实 body 读出 plan_id 与文本；删段落再覆盖后消失；长未解决段落不能绕过总预算 |
+| 删除 | 单条删除后其余 plan 与原记录保留；删掉最后一条时记录文件一并消失且 recall 不再列出该 key；旧 revision 返回 `stale plan` 且不删任何内容；空 plan_id 缺 `confirm` 拒绝且不写盘；继承记录、损坏记录、缺失 key/plan 分别返回 `inherited record`/`invalid record`/`plan not found` 并保留原文件；写盘失败保留旧记录；其他版本与其他应用不受影响；无 `.tmp` 残留 |
 | UIA 授权 | 只读白名单在 allow_foreground=false 时可查询；写/未知成员拒绝且 provider 调用为零；不能按 Get 前缀放行、不能读取原始 Element/pattern/textRange 字段或执行表达式 |
 | 本轮只读扩展 | §4.3 常量逐项与代码相同；用真实 wrapper+假 COM 验证新增 scalar getter、Legacy GetSelection 的真实类型与投影；至少直接验证 Legacy Name/Description/Value 和 WindowVisualState 无授权可读；DoDefaultAction/Select/SetValue/SetWindowVisualState/未知 Get 方法在任何 provider 获取前拒绝；不以属性 getter 的放行证明真实 provider 无夺焦 |
 | UIA 定位/诊断 | 根目标、唯一 AutomationId/name、重复/未命中/不完整树分别覆盖；诊断 warning 保留获取/遍历错误，吞错的 None 标 cause_unknown；大小写、数字 GetPattern 回退、SelectionPattern2 缺 constructor、无 getter、getter抛错均可解释 |
