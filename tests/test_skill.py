@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import unittest
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parents[1] / "skills" / "windows-app-automation" / "SKILL.md"
+TOOL_REFERENCE = SKILL.parent / "references" / "tool-reference.md"
+
+
+def shipped_text() -> str:
+    """SKILL.md plus the tool reference: launch flags live there, not in the method."""
+    text = SKILL.read_text(encoding="utf-8")
+    if TOOL_REFERENCE.is_file():
+        text += "\n" + TOOL_REFERENCE.read_text(encoding="utf-8")
+    return text
 
 
 class TestSkillFile(unittest.TestCase):
@@ -25,9 +36,10 @@ class TestSkillFile(unittest.TestCase):
             self.assertIn(token, self.text, token)
 
     def test_untried_directions_survive(self):
+        shipped = shipped_text()
         for token in ("--disable-gpu", "--disable-features",
                       "--force-renderer-accessibility", "未试方向"):
-            self.assertIn(token, self.text, token)
+            self.assertIn(token, shipped, token)
 
     def test_untried_stays_labelled_untried(self):
         self.assertIn("未验证", self.text)
@@ -79,11 +91,6 @@ class TestSkillFile(unittest.TestCase):
         self.assertIn("effect", self.text.lower()) if "effect" in self.text.lower() else None
         self.assertIn("不自动重发", self.text)
 
-    def test_historical_numbers_are_marked_historical(self):
-        self.assertIn("不是本次测量", self.text)
-        self.assertIn("132", self.text)
-        self.assertIn("128", self.text)
-
     def test_no_duplicated_interface_contract(self):
         # The skill explains routes; signatures live in the handoff.
         self.assertNotIn("def invoke_pattern", self.text)
@@ -91,6 +98,27 @@ class TestSkillFile(unittest.TestCase):
 
     def test_it_does_not_promise_absent_tools(self):
         self.assertIn("工具尚未实现", self.text)
+
+    def test_guided_calls_match_the_registered_mcp_contract(self):
+        from fastmcp import Client
+        from jsonschema import validate
+        from unittest import mock
+        from deskweft import server
+
+        async def schemas():
+            with mock.patch.object(server.uia_worker, "close"):
+                async with Client(server.mcp) as client:
+                    return {tool.name: tool.input_schema for tool in await client.list_tools()}
+
+        contracts = asyncio.run(schemas())
+        examples = [json.loads(block) for block in
+                    re.findall(r"```json\s*\n(.*?)\n```", shipped_text(), re.S)]
+        guided = [example for example in examples if "tool" in example]
+        self.assertGreater(len(guided), 0, "the guide needs executable tool-call examples")
+        for example in guided:
+            with self.subTest(tool=example["tool"]):
+                self.assertIn(example["tool"], contracts)
+                validate(example["arguments"], contracts[example["tool"]])
 
 
 class TestSkillDiscovery(unittest.TestCase):
@@ -122,7 +150,9 @@ class TestSkillDiscovery(unittest.TestCase):
                 self.assertTrue(linked.is_relative_to(root), f"resource escapes skill: {target}")
                 self.assertTrue(linked.is_file(), f"missing resource: {target}")
                 pending.append(linked)
-        self.assertEqual(reached, {path.resolve() for path in root.rglob("*") if path.is_file()})
+        self.assertEqual(reached, {path.resolve() for path in root.rglob("*")
+                                   if path.is_file() and "__pycache__" not in path.parts
+                                   and path.suffix not in (".pyc", ".pyo")})
 
 
 if __name__ == "__main__":

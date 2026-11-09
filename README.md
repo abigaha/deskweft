@@ -57,7 +57,7 @@ counterexample belongs in memory with `uses_foreground=true`.
 
 ## Tools
 
-Sixteen tools cover windows, generic queries, item-container enumeration and memory.
+Eighteen tools cover windows, generic queries, item-container enumeration and memory.
 
 **Reading and acting on one window**
 
@@ -86,9 +86,10 @@ Sixteen tools cover windows, generic queries, item-container enumeration and mem
 - `scroll(hwnd, target, direction)` — UIA `ScrollPattern` with the documented
   enum pair; compares the position before and after, so a no-op is a failure
 - `reveal(hwnd)` — shows a hidden window; this one does take the foreground
-- `open_app(command, accessibility=false)` — starts a program **without letting
-  it pop to the front**. Only windows proven to descend from the new process are
-  hidden; anything else is listed as a candidate and left alone
+- `open_app(command, accessibility=false)` — starts a program and attempts to
+  hide windows proven to descend from the new process; other windows remain
+  candidates. Inspect `visibility_control`, `hidden_windows[].still_visible`
+  and foreground samples. A transient activation remains possible
 
 **The generic routes**
 
@@ -319,38 +320,36 @@ the rename.
 
 ## Known limits
 
-1. **Chromium / Electron / Flutter / games have no Win32 child controls.** `click`
-   always goes through the permission gate there.
-2. **Electron apps hide their UI from accessibility unless launched with it on.**
-   See below — this is the difference between a readable app and a black box.
-3. **Background UIA reads are slow for browsers** (10+ s). The timeout stops it
-   and returns `timed_out: true` rather than hanging.
-4. **`PrintWindow` returns blank frames** for GPU overlays, protected content and
-   minimised windows. Reported as `image_unavailable`, never as a blank picture.
-5. **UWP shell windows read as zero elements.** An `ApplicationFrameWindow` really
-   does contain only empty title-bar and input-sink children; the content lives in
-   a separate `CoreWindow`.
-6. **Win32 multiline edits expose no `ScrollPattern`.** Only the mouse wheel moves
-   them.
-7. **Chromium inputs return `None` from `ValuePattern.Value`** even when the text
-   is there, so read-back verification is impossible; pixel comparison is the only
-   check.
+1. **Custom-rendered controls may have no native child HWND.** Inspect the actual
+   target; without a unique supported native control, `click` needs permission.
+2. **Some tested Electron versions needed launch flags for a usable tree.**
+   Check the running process, app version and page before drawing a conclusion.
+3. **Background UIA reads can exceed their budget.** Inspect tree diagnostics;
+   a worker timeout reports `execution_state="unknown"` and must not cause replay.
+4. **`PrintWindow` can fail or produce blank/stale frames.** Inspect capture
+   diagnostics; an image does not establish business success or nonexecution.
+5. **A UWP shell HWND may expose only shell controls.** Inspect the content host
+   and child windows before concluding that the application has no semantic UI.
+6. **ScrollPattern availability depends on the current container/provider.**
+   Pattern lookup failures need their diagnostics; they do not rule out other routes.
+7. **A Value getter may return `None` or fail after a write.** The write's effect
+   remains unverified; use an independent read or business state, without replay.
 
-### Electron apps are black boxes until accessibility is switched on
+### Historical QQ accessibility observations
 
-Chromium builds its accessibility tree lazily, and an outside UIA client asking
-for it is *not* enough to switch it on. Measured on QQ (Chromium 9.9.22):
+An early QQ sample (reported at the time as 9.9.22) needed a launch flag for a
+usable tree. These counts retain the original sample's traversal/filtering
+conditions and are not current acceptance targets:
 
 | Launch | Elements read | Named |
 |---|---|---|
 | plain | 9 | 0 |
 | `--force-renderer-accessibility` | 128 | 126 |
 
-Those 9 are empty `PaneControl` shells wrapping the D3D surface — no names, no
-addressable controls, nothing to click by name.
+The unflagged sample returned only unnamed `PaneControl` shells; that observation
+does not prove every page or version has the same limitation.
 
-**And Chromium throws the tree away again as soon as another window comes
-forward.** Same window, same session, only the foreground changed:
+A separate historical foreground/occlusion comparison recorded:
 
 | Foreground | Elements |
 |---|---|
@@ -358,21 +357,21 @@ forward.** Same window, same session, only the foreground changed:
 | your editor | 0 |
 | QQ again | 132 |
 
-That is why an agent can read a window one moment and find nothing the next.
-Two flags stop it, and either one alone is enough:
+Two launch flags were tried against this observed occlusion behavior:
 
 - `--disable-backgrounding-occluded-windows`
 - `--disable-features=CalculateNativeWinOcclusion`
 
-`open_app(..., accessibility=True)` passes all three flags. With them a
-backgrounded QQ reads 132 elements on every poll while your editor keeps the
-foreground.
+`open_app(..., accessibility=True)` appends all three flags. Verify adoption and
+read the current target again; the old counts do not guarantee background
+actions, complete lists or behavior across versions. Later observations and
+their distinct conditions are in [the application report](docs/reports/2026-11-08-qq-wechat-live.md)
+and [the packaged cases](skills/windows-app-automation/references/observed-cases.md).
 
 ### Historical QQ click routes
 
-UIA `InvokePattern` on Chromium goes through IA2, which focuses the widget and
-takes the foreground. `LegacyIAccessible.DoDefaultAction` does the same work
-through MSAA and leaves focus alone. Measured on the same backgrounded window:
+An early QQ sample compared these routes on one background window. It did not
+establish provider internals or a general focus guarantee:
 
 | Route | Effect landed | Cursor moved | Foreground moved |
 |---|---|---|---|
