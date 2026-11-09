@@ -1,0 +1,19 @@
+{
+  "clients": [
+    "Codex",
+    "Claude",
+    "DSH"
+  ],
+  "skill_files_per_client": 6,
+  "all_client_resources_match_source": true,
+  "client_configs_unchanged": true,
+  "memory_unchanged": true,
+  "skill_sha256": {
+    "references\\foreground-protection.md": "d36aaa8fe6a7e307f2b7cdfd46058a5a7d112cdec824d5085a40df9245fd3339",
+    "references\\observed-cases.md": "5a7cc6cc24b248be2dbe9424e386227c20a85b0e3d8d6d43635b3885afc1c0de",
+    "references\\tool-reference.md": "e8420272f2e2e28b4f09596facdb2cc10b04e6e3366e8be448170c9e270f7efa",
+    "scripts\\private_desktop.py": "14bae0a5c2fdbcd247b8f2956dd27b18d311374bde01a8ecf973be6cea3e5d96",
+    "scripts\\qq_private_probe.py": "32cdf974354f256952bead1489df9796bd8d212c559fef5f818208729b6576c2",
+    "SKILL.md": "fce3643b0600345f45d10d1f575613e5a5ca524a617d3c6105b5d12d3e89f208"
+  }
+}

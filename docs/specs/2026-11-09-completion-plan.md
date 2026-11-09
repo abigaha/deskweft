@@ -1,5 +1,9 @@
 # DeskWeft 收口执行计划
 
+> 2026-11-09 复核：本文保留为原计划，不能按条目名称视为已完成。
+> 当前状态、错误方案与后续验收见 [执行复核](../reports/2026-11-09-completion-plan-review.md)，
+> 指导目标按 [修订后的职责设计](2026-11-09-three-part-boundaries-design.md) 实施。
+
 日期：2026-11-09。基线：`master` @ `9f926aa`。
 依据：`docs/specs/2026-11-08-implementation-handoff.md`（契约）、
 `docs/specs/2026-11-08-three-layer-design-v2.md`（理由）、

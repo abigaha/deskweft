@@ -1,0 +1,33 @@
+{
+  "server_pid": 9524,
+  "endpoint": "http://127.0.0.1:8765/mcp",
+  "tools": [
+    "app_info",
+    "approve",
+    "click",
+    "confirm_proven",
+    "find_items",
+    "forget",
+    "invoke_pattern",
+    "key",
+    "open_app",
+    "post_message",
+    "private_desktop",
+    "recall",
+    "remember",
+    "reveal",
+    "scroll",
+    "see",
+    "type_text",
+    "windows"
+  ],
+  "tool_count": 18,
+  "descriptions_and_schemas_match_source": true,
+  "windows_metadata_valid": true,
+  "invalid_hwnd_refused": true,
+  "private_desktop_status_ok": true,
+  "missing_unversioned_returns_no_matches": true,
+  "three_invalid_calls_reuse_one_worker": true,
+  "client_configs_unchanged": true,
+  "memory_unchanged": true
+}
