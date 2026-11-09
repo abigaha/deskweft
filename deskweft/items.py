@@ -10,6 +10,32 @@ from windows_mcp.uia import ControlFromHandle, ControlsAreSame
 from . import act, tree
 
 
+def _find_container(root, budget_deadline: float):
+    """The first node under `root` that really exposes ItemContainerPattern.
+
+    `patterns()` reports a fixed seven-item summary, so a container showing an
+    empty patterns list can still support the pattern. Asking each node is the
+    only honest test, and it stops at the deadline.
+    """
+    stack = [(root, 0)]
+    while stack:
+        if time.perf_counter() >= budget_deadline:
+            return None
+        element, depth = stack.pop(0)
+        if depth > 12:
+            continue
+        try:
+            if element is not root and element.GetPattern(10019) is not None:
+                return element
+        except Exception:
+            pass
+        try:
+            stack.extend((kid, depth + 1) for kid in element.GetChildren())
+        except Exception:
+            continue
+    return None
+
+
 def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
                value=None, start_index: int = 0, max_items: int = 100,
                timeout_ms: int = 8000) -> dict:
@@ -79,6 +105,14 @@ def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
                 return finish(found["reason"], found["detail"], state="not_started")
             root = found["element"]["_el"]
         pattern = tree.pattern_detailed(root, "ItemContainerPattern")
+        if not pattern["ok"] and target == "":
+            # The pattern usually sits on the list inside the window, not on the
+            # window itself; the seven-pattern summary does not include it, so
+            # ask each node directly instead of trusting that summary.
+            container = _find_container(root, budget_deadline=deadline)
+            if container is not None:
+                root = container
+                pattern = tree.pattern_detailed(root, "ItemContainerPattern")
         if not pattern["ok"]:
             out = finish(pattern["reason"], pattern.get("detail", ""), state="not_started")
             out.update({k: pattern[k] for k in ("pattern_id", "cause_unknown") if k in pattern})

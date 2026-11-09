@@ -662,6 +662,105 @@ def _identifiers(method: str) -> list[str]:
     return parts
 
 
+_CONTROL_ARGUMENT = "$control"
+_CONTROL_FIELDS = frozenset({"hwnd", "name", "automation_id", "control_type", "rect"})
+
+
+def _is_control_argument(value) -> bool:
+    """Is this a description of a control, rather than data?
+
+    A description is allowed because the worker can resolve it again and check
+    that it still matches. A raw pointer or a bare dictionary would not be: the
+    first cannot cross the protocol, the second is indistinguishable from data.
+    """
+    if not isinstance(value, dict) or set(value) != {_CONTROL_ARGUMENT}:
+        return False
+    spec = value[_CONTROL_ARGUMENT]
+    if not isinstance(spec, dict) or not spec:
+        return False
+    if not set(spec) <= _CONTROL_FIELDS:
+        return False
+    hwnd = spec.get("hwnd")
+    if isinstance(hwnd, bool) or not isinstance(hwnd, int) or hwnd <= 0:
+        return False
+    identity = [key for key in ("name", "automation_id", "control_type")
+                if isinstance(spec.get(key), str) and spec[key]]
+    if not identity:
+        return False
+    if "rect" in spec:
+        rect = spec["rect"]
+        if not isinstance(rect, list) or len(rect) != 4:
+            return False
+        if any(isinstance(v, bool) or not isinstance(v, int) for v in rect):
+            return False
+    return True
+
+
+def _control_signature(el) -> tuple | None:
+    """A cheap identity for one control, or None when it cannot be read."""
+    try:
+        rect = el.BoundingRectangle
+        box = (rect.left, rect.top, rect.right, rect.bottom)
+    except Exception:
+        box = None
+    name = getattr(el, "Name", None)
+    if not isinstance(name, str):
+        return None
+    return (name, box)
+
+
+def _resolve_arguments(hwnd: int, args) -> dict:
+    """Replace control descriptions with live controls, in the worker thread.
+
+    Every description is resolved against a complete tree read and must match
+    exactly once; the resolved element is checked against the signature the
+    caller described, so a reference to a control that has since moved or been
+    replaced is refused rather than acted on.
+    """
+    if not args:
+        return {"ok": True, "args": []}
+    resolved: list = []
+    for value in args:
+        if not _is_control_argument(value):
+            resolved.append(value)
+            continue
+        spec = value[_CONTROL_ARGUMENT]
+        if spec.get("hwnd") != hwnd:
+            return {"ok": False, "reason": "invalid arguments",
+                    "detail": "a control argument must name the window it is resolved in"}
+        detailed = tree.read_detailed(hwnd, timeout_ms=3000, max_elements=600)
+        if detailed["timed_out"] or detailed["limit_reached"] \
+                or not detailed["identity_complete"]:
+            return {"ok": False, "reason": "tree incomplete",
+                    "detail": "the referenced control cannot be re-resolved reliably"}
+
+        def matches(row: dict) -> bool:
+            for key, field in (("name", "name"), ("automation_id", "automation_id"),
+                               ("control_type", "control_type")):
+                wanted = spec.get(key)
+                if wanted and row.get(field) != wanted:
+                    return False
+            return True
+
+        candidates = [row for row in detailed["elements"] if matches(row)]
+        if len(candidates) > 1:
+            return {"ok": False, "reason": "ambiguous target",
+                    "detail": f"{len(candidates)} controls still match the reference"}
+        if not candidates:
+            return {"ok": False, "reason": "no such control",
+                    "detail": "the referenced control is no longer in this window"}
+        row = candidates[0]
+        if "rect" in spec and row.get("rect") != spec["rect"]:
+            return {"ok": False, "reason": "no such control",
+                    "detail": f"the control moved: {row.get('rect')} != {spec['rect']}"}
+        live = row.get("_el")
+        if live is None:
+            return {"ok": False, "reason": "no such control",
+                    "detail": "the resolved row carries no live control"}
+        resolved.append(live)
+    return {"ok": True, "args": resolved}
+
+
 def _argument_error(args) -> str | None:
     if args is None:
         return None
@@ -671,6 +770,8 @@ def _argument_error(args) -> str | None:
         if isinstance(value, bool) or isinstance(value, int) or isinstance(value, str):
             continue
         if isinstance(value, float) and value == value and abs(value) != float("inf"):
+            continue
+        if _is_control_argument(value):
             continue
         return f"{value!r} is not a finite JSON scalar"
     return None
@@ -836,9 +937,26 @@ def invoke_pattern(hwnd: int, pattern: str, target: str | dict,
                 or not 1 <= cap <= MAX_TEXT + 1:
             return _fail("invalid arguments",
                          "DocumentRange.GetText needs maxLength in 1..6001", before)
-    elif read_only and args and len(parts) == 1:
-        return _fail("invalid arguments", f"{method} is a property and takes no arguments",
-                     before)
+    # Whether a member takes arguments follows the wrapper's own descriptor, not
+    # the table it appears in: SelectionPattern.GetSelection is a method while
+    # ValuePattern.Value is a property. Ask the class before touching the
+    # provider, so a property with arguments is refused without a call.
+    if args and len(parts) == 1:
+        kind = None
+        try:
+            from windows_mcp.uia.patterns import PatternConstructors
+
+            for constructor in PatternConstructors.values():
+                if hasattr(constructor, parts[0]):
+                    kind = constructor
+                    break
+        except Exception:
+            kind = None
+        if kind is not None:
+            descriptor = inspect.getattr_static(kind, parts[0])
+            if isinstance(descriptor, property):
+                return _fail("invalid arguments",
+                             f"{method} is a property and takes no arguments", before)
 
     if not read_only and not allow_foreground:
         result = _needs_permission(
@@ -898,7 +1016,13 @@ def invoke_pattern(hwnd: int, pattern: str, target: str | dict,
             member = getattr(holder, last, None)
             if not callable(member):
                 return _fail("member unavailable", f"{method} is not callable here", before)
-            returned = member(*args)
+            # A control description becomes a live control here, in the worker
+            # thread, after re-resolving and re-checking it - never a cached
+            # reference from an earlier request.
+            prepared = _resolve_arguments(hwnd, args)
+            if not prepared["ok"]:
+                return _fail(prepared["reason"], prepared["detail"], before)
+            returned = member(*prepared["args"])
     except Exception as error:
         return _fail("provider error",
                      f"{pattern}.{method}: {type(error).__name__}: {error}", before,
