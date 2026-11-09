@@ -228,23 +228,38 @@ click/type_text/scroll 的旧字符串路线保留既有唯一子串回退语义
 | UWP/WinUI 壳窗口只有标题栏或空 Pane | 核对 ApplicationFrameWindow、原生子窗口及独立内容窗口，查找实际 CoreWindow/内容承载 HWND 后重新 see | 壳为空不证明内容无树；不能跨 PID 仅凭标题猜错对象。找不到承载窗口时记录定位缺口。 |
 | 有树但点击/写入无效 | 先读取值/状态，排除动作仍在排队或执行结果未知；再比较已授权的 Legacy、Invoke、选择、展开等语义路线，**并且用截图像素判断界面到底动没动** | Legacy 是候选路线，不保证所有应用都不夺焦，也不保证会执行；当前 click 的 Legacy 路由仍在前台权限门之后。某个 setter 静默返回时必须读回或观察实际效果。 |
 
-**判断"点了没反应"必须看截图，不能看返回值或元素数**（2026-11-09 实测 QQ 9.9.37）：
+**判断"点了没反应"必须看真实屏幕，不能看返回值、元素数或 `see` 的截图**
+（2026-11-09 QQ 9.9.37 + WinForms 对照实测）：
 
-| 操作 | 返回值 | 像素变化 | 界面 |
+| 操作 | 返回值 | 真实屏幕 | 界面 |
 |---|---|---|---|
-| Legacy `DoDefaultAction`（QQ 在前台） | `True` / completed | **0** | 不变 |
-| 真实鼠标点击同一矩形 | — | ~56000 | 切到联系人页 |
+| 导航按钮 Legacy `DoDefaultAction`（QQ 在前台） | `True` / completed | **0** | 不变 |
+| 导航按钮 `TogglePattern.Toggle` | `True` / completed | **0** | 不变；ToggleState 前后都是 1 |
+| 真实鼠标点击同一矩形 | — | 5.6 万–77 万 px | 切到联系人页 |
+| 搜索结果行 `InvokePattern.Invoke` | `True` | **779414 px** | 会话真的打开 |
+| 联系人分组 `ExpandCollapse.Expand` | `True` | 46852 px，+35 名字 | 真的展开 |
+| WinForms 按钮 Legacy / Invoke（对照） | `True` | 计数器 +1 | 真的执行 |
 
-- provider 返回 `True` 只说明调用没报错，**不说明它做了什么**。
-- 元素数也不可靠：同一次点击后树从 316 变成 166，屏幕却一个像素没动。
-- 工具的 `click` 现在会先截图，事后比较，并给出
-  `observation="no visible change detected"` 与
-  `route_effect="not observed: the window did not redraw"`。
-  看到这两个字段就当**这次点击没生效**，换路线，不要因为 `ok=true` 继续。
-- 遇到这种情况的下一步：确认目标真的在前台（`foreground()==hwnd`，不是看
-  force_foreground 的返回值），再试真实鼠标；仍无效就记入 memory 的未解决，
-  不要重复同一路线的调用。
-| 自绘/Canvas/GPU 画面、树无语义控件 | 并行检查无障碍/Legacy、原生子 HWND、应用快捷键、官方自动化接口或导出；截图仅帮助观察 | 不假设当前有坐标点击工具；若需视觉交互而工具未提供，记录缺口或用已授权且确实可用的工具。截图不可用不证明其他通道不可用。 |
+三条必须记住的判断规则：
+- provider 返回 `True` 只说明调用没报错，**不说明它做了什么**；
+  同一版本里同一 API 有的控件执行、有的不执行（上表：搜索行有效、导航按钮无效）。
+- **元素数不可靠**：一次点击后树从 316 变成 166，屏幕却一个像素没动。
+- **`see` 的截图不可靠**：同窗口空闲两次，PrintWindow 差异 0、真实屏幕差异
+  1133964 像素——`PrintWindow` 会返回缓存帧。判定界面变化要用真实屏幕抓取，
+  或者用树里的结构标记（例如"会话列表"出现/消失）。
+- 工具 `click` 会先截图再比较，给出 `observation="no visible change detected"` 与
+  `route_effect="not observed: the window did not redraw"`。看到就当这次没生效，
+  换路线，不要因为 `ok=true` 继续。
+- 无效时按下一步：确认真的在前台（`foreground()==hwnd`，不是看
+  `force_foreground` 的返回值）→ 换**另一种控件类型**的路线（见下）→ 真实鼠标。
+  **不要因为一个控件类型失败就断言整个应用不支持**。
+
+**失败要按控件类型收窄，不能推广**。QQ 9.9.37 的反例：
+导航按钮（Toggle 型）语义无效，但同一窗口里搜索框的 `SetValue`、搜索结果的
+`Invoke`、分组行的 `ExpandCollapse` 都有效。只测导航按钮就写"QQ 语义不可用"
+是错的。
+
+| 自绘/Canvas/GPU 画面、树无语义控件 | 并行检查无障碍/Legacy、原生子 HWND、应用快捷键、**应用自带搜索/筛选**、官方自动化接口或导出；截图仅帮助观察 | 不假设当前有坐标点击工具；若需视觉交互而工具未提供，记录缺口或用已授权且确实可用的工具。截图不可用不证明其他通道不可用。 |
 
 **微信（Weixin 4.2.0.13）是这条的一个确定实例**，实测 2026-11-09：登录页有完整语义
 （28 元素、含 AutomationId 的按钮），但登录后的主窗口只暴露 1 个 `PaneControl`，
