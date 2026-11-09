@@ -365,6 +365,22 @@ def _units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def tree_size(hwnd: int) -> int | None:
+    """How many elements the window exposes right now, or None if unreadable.
+
+    A click can change the whole view while leaving the clicked control exactly
+    as it was (measured on QQ: a contact group click went from 185 to 256
+    elements while the label did not change).
+    """
+    try:
+        detailed = tree.read_detailed(hwnd, timeout_ms=1500, max_elements=900)
+    except Exception:
+        return None
+    if detailed["timed_out"] or not detailed["identity_complete"]:
+        return None
+    return len(detailed["elements"])
+
+
 def _state_signature(el) -> tuple | None:
     """What can be cheaply observed about a control, or None if nothing can.
 
@@ -406,6 +422,7 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
         if not callable(member):
             continue
         before = _state_signature(el)
+        size_before = tree_size(hwnd)
         try:
             returned = member()
         except Exception as error:
@@ -418,9 +435,16 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
                          effect_verified=False)
         done = _done(hwnd, "click", target, label, fg_before, start)
         after = _state_signature(el)
+        size_after = tree_size(hwnd)
         # Measured on WeChat: both semantic routes returned True while nothing
-        # moved. Success is reported, but never as an effect.
-        if before is not None and after is not None and before == after:
+        # moved. Success is reported, but never as an effect. The view can change
+        # without the clicked control changing, so both are compared - and an
+        # unreadable side proves nothing either way.
+        unchanged_control = (before is not None and after is not None
+                             and before == after)
+        unchanged_tree = (size_before is not None and size_after is not None
+                          and size_before == size_after)
+        if unchanged_control and unchanged_tree:
             done["observation"] = "no visible change detected"
         return done
 

@@ -473,6 +473,47 @@ class TestClickObservation(ActCase):
         self.assertTrue(result["ok"], result)
         self.assertNotIn("observation", result)
 
+    def test_a_click_that_changed_the_tree_is_not_called_a_no_op(self):
+        """Measured on QQ: clicking a contact group changed the tree from 185 to
+        256 elements while the clicked label itself was unchanged. Judging only
+        the clicked control reported a false "no visible change"."""
+        target = el(name="我的好友", automation_id="")
+        sizes = iter([185, 256])
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act, "tree_size", side_effect=lambda hwnd: next(sizes)), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda el, name: (
+                                   {"ok": True, "value": mock.Mock(
+                                       DoDefaultAction=mock.Mock(return_value=True)),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="我的好友", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result)
+
+    def test_an_unreadable_tree_size_does_not_prove_a_change(self):
+        target = el(name="x", automation_id="")
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act, "tree_size", return_value=None), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda el, name: (
+                                   {"ok": True, "value": mock.Mock(
+                                       DoDefaultAction=mock.Mock(return_value=True)),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="x", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result,
+                         "an unreadable tree must not be reported as a change")
+
     def test_an_unreadable_state_is_not_reported_as_unchanged(self):
         """If the control's own name cannot be read, the tool has observed
         nothing and must not claim "no change"."""
