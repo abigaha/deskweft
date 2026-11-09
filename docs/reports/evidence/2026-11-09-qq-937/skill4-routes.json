@@ -1,0 +1,49 @@
+{
+  "target": {
+    "name": "消息 3条未读",
+    "control_type": "ButtonControl"
+  },
+  "rows": [
+    {
+      "label": "LegacyIAccessiblePattern.DoDefaultAction",
+      "pixels": 0,
+      "ok": true,
+      "result": "True",
+      "reason": null,
+      "observation": null
+    },
+    {
+      "label": "InvokePattern.Invoke",
+      "pixels": 0,
+      "ok": false,
+      "result": "None",
+      "reason": "pattern unavailable",
+      "observation": null
+    },
+    {
+      "label": "SelectionItemPattern.Select",
+      "pixels": 0,
+      "ok": false,
+      "result": "None",
+      "reason": "pattern unavailable",
+      "observation": null
+    },
+    {
+      "label": "TogglePattern.Toggle",
+      "pixels": 0,
+      "ok": true,
+      "result": "True",
+      "reason": null,
+      "observation": null
+    },
+    {
+      "label": "act.click (tool-chosen route)",
+      "pixels": 0,
+      "ok": true,
+      "result": "None",
+      "reason": null,
+      "observation": "no visible change detected",
+      "route": "uia:legacy-default"
+    }
+  ]
+}

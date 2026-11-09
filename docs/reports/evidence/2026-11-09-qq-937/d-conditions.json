@@ -1,0 +1,237 @@
+[
+  {
+    "label": "baseline",
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion"
+    ],
+    "pid": 26392,
+    "foreground_before": 66844,
+    "foreground_after_launch": 3016560,
+    "launch_hidden": 23,
+    "visibility_control": "applied",
+    "candidates": 0,
+    "login_window": 3016560,
+    "elements": 315,
+    "named": 119,
+    "complete": true,
+    "names": [
+      "QQ",
+      "Chrome Legacy Window",
+      "窗口控制区域",
+      "迷你窗 Ctrl + Alt + E",
+      "切换为经典模式",
+      "最小化",
+      "最大化",
+      "关闭",
+      "<account-avatar>",
+      "在线状态",
+      "<account>",
+      "个性签名:我一次次跌倒，一次次爬起来，摔得头破血流，却不知道悔改。,点击编辑"
+    ],
+    "effective_flags": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion"
+    ],
+    "gpu_related": [
+      "--disable-features=CalculateNativeWinOcclusion"
+    ]
+  },
+  {
+    "label": "D1_disable_gpu",
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-gpu"
+    ],
+    "pid": 16184,
+    "foreground_before": 66844,
+    "foreground_after_launch": 591304,
+    "launch_hidden": 23,
+    "visibility_control": "applied",
+    "candidates": 0,
+    "login_window": 591304,
+    "elements": 315,
+    "named": 119,
+    "complete": true,
+    "names": [
+      "QQ",
+      "Chrome Legacy Window",
+      "窗口控制区域",
+      "迷你窗 Ctrl + Alt + E",
+      "切换为经典模式",
+      "最小化",
+      "最大化",
+      "关闭",
+      "<account-avatar>",
+      "在线状态",
+      "<account>",
+      "个性签名:我一次次跌倒，一次次爬起来，摔得头破血流，却不知道悔改。,点击编辑"
+    ],
+    "effective_flags": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-gpu"
+    ],
+    "gpu_related": [
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-gpu"
+    ]
+  },
+  {
+    "label": "D2_disable_features_extra",
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion,CalculateNativeWinOcclusion"
+    ],
+    "pid": 22056,
+    "foreground_before": 66844,
+    "foreground_after_launch": 656880,
+    "launch_hidden": 23,
+    "visibility_control": "applied",
+    "candidates": 0,
+    "login_window": 656880,
+    "elements": 315,
+    "named": 119,
+    "complete": true,
+    "names": [
+      "QQ",
+      "Chrome Legacy Window",
+      "窗口控制区域",
+      "迷你窗 Ctrl + Alt + E",
+      "切换为经典模式",
+      "最小化",
+      "最大化",
+      "关闭",
+      "<account-avatar>",
+      "在线状态",
+      "<account>",
+      "个性签名:我一次次跌倒，一次次爬起来，摔得头破血流，却不知道悔改。,点击编辑"
+    ],
+    "effective_flags": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion,CalculateNativeWinOcclusion"
+    ],
+    "gpu_related": [
+      "--disable-features=CalculateNativeWinOcclusion,CalculateNativeWinOcclusion"
+    ]
+  },
+  {
+    "label": "D3_bare",
+    "args": [],
+    "pid": 15864,
+    "foreground_before": 66844,
+    "foreground_after_launch": 1050098,
+    "launch_hidden": 23,
+    "visibility_control": "applied",
+    "candidates": 0,
+    "login_window": 1050098,
+    "elements": 13,
+    "named": 2,
+    "complete": true,
+    "names": [
+      "QQ",
+      "Chrome Legacy Window"
+    ],
+    "effective_flags": [],
+    "gpu_related": []
+  },
+  {
+    "label": "D4_cdp",
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--remote-debugging-port=9222"
+    ],
+    "pid": 26348,
+    "foreground_before": 66844,
+    "foreground_after_launch": 3278704,
+    "launch_hidden": 23,
+    "visibility_control": "applied",
+    "candidates": 0,
+    "login_window": 3278704,
+    "elements": 315,
+    "named": 119,
+    "complete": true,
+    "names": [
+      "QQ",
+      "Chrome Legacy Window",
+      "窗口控制区域",
+      "迷你窗 Ctrl + Alt + E",
+      "切换为经典模式",
+      "最小化",
+      "最大化",
+      "关闭",
+      "<account-avatar>",
+      "在线状态",
+      "<account>",
+      "个性签名:我一次次跌倒，一次次爬起来，摔得头破血流，却不知道悔改。,点击编辑"
+    ],
+    "effective_flags": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--remote-debugging-port=9222"
+    ],
+    "gpu_related": [
+      "--disable-features=CalculateNativeWinOcclusion"
+    ],
+    "qq_listeners": [
+      {
+        "pid": 26348,
+        "port": 4301
+      },
+      {
+        "pid": 26348,
+        "port": 4310
+      },
+      {
+        "pid": 26348,
+        "port": 9210
+      },
+      {
+        "pid": 26348,
+        "port": 5283
+      },
+      {
+        "pid": 26348,
+        "port": 4001
+      }
+    ],
+    "devtools_flag": true,
+    "devtools_probe": [
+      {
+        "port": 4001,
+        "ok": false,
+        "error": "RemoteDisconnected"
+      },
+      {
+        "port": 4301,
+        "ok": false,
+        "error": "RemoteDisconnected"
+      },
+      {
+        "port": 4310,
+        "ok": true,
+        "body": "{:��a�d&_\b�E�'�-\u0000\u0000\u0000�\u0000\u0000\u0000�-����ws�\u0015U0�=��u��+\u001e������\u0004�L<��ܙq6\u0000��j�\u000fVe��s��D\beR\u0007\rU��\fŸ\u0016K�\u00013�����m�;`9�z���L�S�C�16˖��B���N\u0003p|,@�g\u0019RO�c���\u001c������y�:߹�)�\u0003\u0015\u0017�Ջ@6��??�"
+      },
+      {
+        "port": 5283,
+        "ok": false,
+        "error": "HTTPError"
+      },
+      {
+        "port": 9210,
+        "ok": true,
+        "body": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlcnJDb2RlIjo0MDA2LCJlcnJNc2ciOiLnpajmja7moKHpqozlpLHotKUiLCJwb3J0Ijo5MjEwLCJpYXQiOjE3OTQyMDYzOTh9.IjvscJHZCChUsjvJ_MQcaJ6--1jJ0osfOSwQyLST_7A"
+      }
+    ]
+  }
+]

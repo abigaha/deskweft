@@ -1,0 +1,57 @@
+[
+  {
+    "label": "Legacy DoDefaultAction",
+    "ok": true,
+    "call_ok": true,
+    "call_result": "True",
+    "call_reason": null,
+    "page_before": "messages",
+    "page_after": "messages",
+    "changed": false,
+    "changed_after_seconds": null,
+    "screen_diff": 2464,
+    "pages_seen": [
+      "messages",
+      "messages",
+      "messages",
+      "messages",
+      "messages",
+      "messages"
+    ]
+  },
+  {
+    "label": "act.click",
+    "ok": true,
+    "call_ok": true,
+    "call_result": "None",
+    "call_reason": null,
+    "page_before": "messages",
+    "page_after": "messages",
+    "changed": false,
+    "changed_after_seconds": null,
+    "screen_diff": 2075,
+    "pages_seen": [
+      "messages",
+      "messages",
+      "messages",
+      "messages",
+      "messages",
+      "messages"
+    ]
+  },
+  {
+    "label": "real cursor click",
+    "ok": true,
+    "call_ok": true,
+    "call_result": "cursor click sent",
+    "call_reason": null,
+    "page_before": "messages",
+    "page_after": "contacts",
+    "changed": true,
+    "changed_after_seconds": 1,
+    "screen_diff": 58660,
+    "pages_seen": [
+      "contacts"
+    ]
+  }
+]

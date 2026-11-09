@@ -1,0 +1,26 @@
+[
+  {
+    "route": "LegacyIAccessiblePattern.DoDefaultAction",
+    "call_ok": true,
+    "reason": null,
+    "before": "count:0",
+    "after": "count:1",
+    "works": true
+  },
+  {
+    "route": "InvokePattern.Invoke",
+    "call_ok": true,
+    "reason": null,
+    "before": "count:1",
+    "after": "count:2",
+    "works": true
+  },
+  {
+    "route": "act.click",
+    "call_ok": true,
+    "route_taken": "win32:BM_CLICK",
+    "before": "count:2",
+    "after": "count:3",
+    "works": true
+  }
+]

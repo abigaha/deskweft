@@ -1,0 +1,33 @@
+{
+  "pid": 18616,
+  "hwnd": 1508750,
+  "foreground_achieved": true,
+  "nav_rect": [
+    12,
+    88,
+    36,
+    36
+  ],
+  "semantic_foreground": {
+    "ok": true,
+    "result": true,
+    "observation": null,
+    "pixels": 0,
+    "fg_now": true
+  },
+  "cursor": {
+    "pixels": 55923
+  },
+  "final": {
+    "elements": 166,
+    "named": 67,
+    "counters": [
+      "1/1",
+      "51/93",
+      "0/0",
+      "0/0",
+      "0/0",
+      "1/5"
+    ]
+  }
+}

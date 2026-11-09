@@ -1,0 +1,27 @@
+{
+  "pid": 3560,
+  "hwnd": 1574386,
+  "revealed": true,
+  "foreground_is_qq": false,
+  "control_diff": 0,
+  "nav_rect": [
+    12,
+    88,
+    36,
+    36
+  ],
+  "elements_before": 316,
+  "semantic": {
+    "ok": true,
+    "result": true,
+    "observation": null,
+    "pixels": 0
+  },
+  "elements_after_semantic": 316,
+  "cursor_point": [
+    30,
+    106
+  ],
+  "cursor_owner": 1574386,
+  "cursor_pixels": 56010
+}

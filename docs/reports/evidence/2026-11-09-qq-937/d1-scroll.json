@@ -1,0 +1,94 @@
+[
+  {
+    "label": "baseline",
+    "pid": 19156,
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion"
+    ],
+    "gpu_args": [
+      "--disable-features=CalculateNativeWinOcclusion"
+    ],
+    "hwnd": 1574596,
+    "initial": {
+      "elements": 315,
+      "named": 119,
+      "counters": [],
+      "scrollable": 13,
+      "complete": true
+    },
+    "contacts_switch": {
+      "ok": true,
+      "reason": null
+    },
+    "contacts": {
+      "elements": 315,
+      "named": 119,
+      "counters": [],
+      "scrollable": 13
+    },
+    "scroll": {
+      "scroll_ok": false,
+      "scroll_reason": "not scrollable through UIA",
+      "scroll_percent": null,
+      "effect_verified": false,
+      "names_before": 119,
+      "names_after": 119,
+      "names_changed": false,
+      "new_names": 0,
+      "counters_before": [],
+      "counters_after": [],
+      "scrollable_before": 13,
+      "scrollable_after": 13
+    },
+    "ok": true
+  },
+  {
+    "label": "D1_disable_gpu",
+    "pid": 21436,
+    "args": [
+      "--force-renderer-accessibility",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-gpu"
+    ],
+    "gpu_args": [
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-gpu"
+    ],
+    "hwnd": 2623350,
+    "initial": {
+      "elements": 315,
+      "named": 119,
+      "counters": [],
+      "scrollable": 13,
+      "complete": true
+    },
+    "contacts_switch": {
+      "ok": false,
+      "reason": "tree incomplete"
+    },
+    "contacts": {
+      "elements": 315,
+      "named": 119,
+      "counters": [],
+      "scrollable": 13
+    },
+    "scroll": {
+      "scroll_ok": false,
+      "scroll_reason": "not scrollable through UIA",
+      "scroll_percent": null,
+      "effect_verified": false,
+      "names_before": 119,
+      "names_after": 119,
+      "names_changed": false,
+      "new_names": 0,
+      "counters_before": [],
+      "counters_after": [],
+      "scrollable_before": 13,
+      "scrollable_after": 13
+    },
+    "ok": true
+  }
+]
