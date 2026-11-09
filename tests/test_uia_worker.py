@@ -293,6 +293,36 @@ class TestStartup(WorkerCase):
         self.assertEqual(second["reason"], "worker unavailable")
         spawn.assert_not_called()
 
+    def test_a_slow_first_start_is_transient_when_the_child_was_reclaimed(self):
+        """Measured: a real service spawn once missed its budget and went sticky,
+        which disabled every desktop tool until a restart. A clean reap means a
+        retry is safe, so one slow cold start must not be permanent."""
+        attempts = {"n": 0}
+
+        def spawn():
+            attempts["n"] += 1
+            failure = uia_worker.StartupFailure("TimeoutError: IPC deadline exceeded",
+                                                transport_ready=False)
+            failure.retryable = True
+            raise failure
+
+        with mock.patch.object(uia_worker, "_spawn", side_effect=spawn):
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(first["ok"])
+        self.assertTrue(first["retry_safe"], first)
+        self.assertEqual(attempts["n"], 2, "a retryable start must be retried")
+        self.assertIsNone(uia_worker._unavailable)
+
+    def test_a_worker_that_survives_its_reap_is_never_retried(self):
+        with mock.patch.object(uia_worker, "_spawn",
+                               side_effect=uia_worker.StartupFailure(
+                                   "survived", transport_ready=False)):
+            with mock.patch.object(uia_worker, "_reap", return_value=(1.0, True)):
+                first = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertEqual(first["reason"], "worker unavailable")
+        self.assertIsNotNone(uia_worker._unavailable)
+
     def test_a_slow_start_after_transport_ready_may_rebuild(self):
         """transport_ready arrived and the child was reaped, so the handoff
         completed: a slow initialization must not disable every desktop tool."""

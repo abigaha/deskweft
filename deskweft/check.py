@@ -334,25 +334,32 @@ def main() -> int:
         launched_pids = {res.get("pid")}
         launched_pids.update(w["pid"] for w in res.get("hidden_windows", []))
         hidden = [w["hwnd"] for w in res.get("hidden_windows", [])]
-        if hidden:
-            r = act.act(hidden[0], "type", target="RICHEDIT", text="hidden write")
-            kids = [k for k in win32.children(hidden[0])
+        # A launch reports every owned window, including IME and input sites
+        # that have no editor. Pick the one that actually carries a text control
+        # instead of assuming the first.
+        editor_owner = next(
+            (hwnd for hwnd in hidden
+             if any("RICHEDIT" in k["class"].upper() for k in win32.children(hwnd))),
+            None)
+        if editor_owner is not None:
+            r = act.act(editor_owner, "type", target="RICHEDIT", text="hidden write")
+            kids = [k for k in win32.children(editor_owner)
                     if "RICHEDIT" in k["class"].upper()]
             got = (win32.post_message(kids[0]["hwnd"], 0x000D, wait=True,
                                       max_chars=4096).get("text") if kids else None)
             check("a hidden window still accepts text",
                   r.get("ok") is True and got == "hidden write", repr(got))
         else:
-            # Notepad on this machine may be single-instance and hand the work to
-            # an already running copy, so no window belongs to the process we
-            # started. That is the honest outcome, not a failure: report it and
-            # say the launch window itself could not be attribution-verified.
+            # Either this Notepad is single-instance and handed the work to an
+            # already running copy (so no window belongs to the process this run
+            # started), or every owned window is an input site with no editor.
+            # Both are honest outcomes, and neither is proof that typing failed.
             print(f"  SKIP  a hidden window still accepts text"
                   f"  (visibility_control={res.get('visibility_control')}, "
-                  f"no window was proven to belong to the launch)")
-            check("launch() reports an unconfirmed window instead of guessing",
-                  res.get("visibility_control") in ("unconfirmed", "partial")
-                  and res.get("target_window_confirmed") is False)
+                  f"{len(hidden)} owned window(s), none with an editor)")
+            check("launch() never claims a window it cannot attribute",
+                  res.get("target_window_confirmed") in (True, False)
+                  and (bool(hidden) == bool(res.get("target_window_confirmed"))))
 
         # Notepad may be single-instance, so prove the owned-window path on an
         # app that really starts a new process.

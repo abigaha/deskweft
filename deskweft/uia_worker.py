@@ -29,7 +29,9 @@ import time
 
 MAX_FRAME_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-STARTUP_MS = 5000
+# A cold spawn on a busy machine can take a while: COM init plus importing the
+# UIA dependency. The handshake is bounded by this, not by hope.
+STARTUP_MS = 15000
 CLOSE_GRACE_MS = 1000
 
 _ACTIONS = ("see", "click", "type_text", "key", "scroll", "invoke_pattern", "find_items")
@@ -60,6 +62,9 @@ class StartupFailure(Exception):
         self.transport_ready = transport_ready
         self.reason = reason or ("worker init timeout" if transport_ready
                                  else "worker unavailable")
+        # Set by _spawn when the child was reclaimed cleanly: the next call may
+        # build a new worker instead of the service staying unavailable forever.
+        self.retryable = transport_ready
 
 
 # ---------- framing ----------
@@ -375,8 +380,14 @@ def _spawn() -> dict:
         return {"process": proc, "channel": parent, "started": True,
                 "transport_ready": True, "start_ms": start_ms,
                 "startup_ms": round((time.monotonic() - started) * 1000, 1)}
-    except StartupFailure:
-        _startup_reap(proc, parent)
+    except StartupFailure as failure:
+        clean = _startup_reap(proc, parent)
+        if clean and not failure.transport_ready:
+            # Nothing arrived before the deadline and the child is gone. A cold
+            # start can be slower than the budget (measured: a first spawn on a
+            # busy machine), so this is a transient failure, not a permanent
+            # disability of the service.
+            failure.retryable = True
         raise
     except Exception as error:
         _startup_reap(proc, parent)
@@ -384,17 +395,20 @@ def _spawn() -> dict:
                              transport_ready=handoff) from None
 
 
-def _startup_reap(proc, channel) -> None:
-    """Reclaim a half-built worker, and refuse to retry if it would not die.
+def _startup_reap(proc, channel) -> bool:
+    """Reclaim a half-built worker. Returns True when the process really died.
 
-    The same rule as _discard: one wedged child is a failure to report, not a
-    process to replace. A retry here would start another one.
+    A survivor is a hard stop: retrying would start another wedged child, so the
+    caller goes sticky unavailable. A clean reap means the slot is free, and the
+    caller decides whether to try again.
     """
     global _unavailable
     _, alive = _reap(proc, channel)
     if alive:
         _unavailable = ("worker unavailable: a starting worker survived "
                         "terminate and kill")
+        return False
+    return True
 
 
 def _reap(proc, channel) -> tuple[float, bool]:
@@ -492,10 +506,11 @@ def call(action: str, parameters: dict, timeout_ms: int) -> dict:
         except RuntimeError as error:
             return _unavailable_result(str(error))
         except StartupFailure as error:
-            if error.transport_ready:
-                # The handoff completed and the child was reaped, so this is a
-                # transient start problem: report it, let the next call retry,
-                # and never leave every desktop tool permanently disabled.
+            if error.retryable:
+                # The child was reclaimed cleanly, so this is a transient start
+                # problem: report it and let the next call build a fresh worker.
+                # Leaving every desktop tool disabled for the service's life
+                # because one cold start was slow is the worse failure.
                 return {"ok": False, "reason": error.reason, "detail": error.detail,
                         "execution_state": "not_started", "effect_verified": False,
                         "retry_safe": True, "worker_restarted": False}
