@@ -450,6 +450,12 @@ def remember(app: StrictStr, version: StrictStr | None, plan_id: StrictStr,
     resets that plan's reviewed and proven. Unknown side effects mean
     uses_foreground=true. This is text storage only: nothing in a body ever
     executes.
+
+    Memory holds routes, not evidence. Store what was measured and where, and
+    keep the raw JSON, screenshots and reports in the repository; a plan whose
+    only copy is here is one bad write away from being lost. Replacing a whole
+    record to "clean it up" also deletes failure paths and untried directions,
+    which are exactly the parts the next session needs.
     """
     return memory.remember(app, version, plan_id, summary, cost, body,
                            uses_foreground, overwrite)

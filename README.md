@@ -422,6 +422,14 @@ protection attempts, private-desktop experiments, and incomplete data coverage.
 It records complete measured request costs and identifies unmeasured setup and
 cleanup costs; the historical results below remain a separate record.
 
+The [QQ 9.9.37 route report](docs/reports/2026-11-09-qq-9.9.37-routes.md) covers the
+build after the app updated: which semantic routes still work (the app's own search,
+result-row `Invoke`, group `ExpandCollapse`) and which do not (navigation buttons),
+plus the measuring mistakes that produced a wrong verdict first — `PrintWindow`
+returning cached frames, element counts moving while the screen did not. Those
+measurements were taken with the window in the foreground; none of them is a
+background result.
+
 Historical report: 128 assertions, described at the time as seven suites,
 against real applications — Notepad, Paint,
 VS Code, Explorer, Calculator, Notepad++, and a live browser session.
