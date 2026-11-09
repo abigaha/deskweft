@@ -180,6 +180,61 @@ def center(hwnd: int) -> tuple[int, int]:
     return (r.left + r.right) // 2, (r.top + r.bottom) // 2
 
 
+user32.WindowFromPoint.argtypes = [wintypes.POINT]
+user32.WindowFromPoint.restype = wintypes.HWND
+user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetAncestor.restype = wintypes.HWND
+user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+user32.GetGUIThreadInfo.restype = wintypes.BOOL
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+GA_ROOT = 2
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+        ("rcCaret", wintypes.RECT),
+    ]
+
+
+def window_at(x: int, y: int) -> int:
+    """The root window that owns screen point (x, y), or 0.
+
+    This is what a real cursor click would hit. A tool that addresses one window
+    must compare this against that window before moving the mouse, because
+    otherwise the click lands on whatever happens to be on top.
+    """
+    hit = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    if not hit:
+        return 0
+    root = user32.GetAncestor(hit, GA_ROOT)
+    return int(root or hit)
+
+
+def focus_window() -> int:
+    """The focused control of the foreground window's thread, or 0.
+
+    GetFocus() only answers for the calling thread, so a tool looking at another
+    process must ask that thread instead.
+    """
+    foreground = user32.GetForegroundWindow()
+    if not foreground:
+        return 0
+    thread = user32.GetWindowThreadProcessId(foreground, None)
+    if not thread:
+        return 0
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(GUITHREADINFO)
+    if not user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return 0
+    return int(info.hwndFocus or 0)
+
+
+
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
 SWP_NOMOVE = 0x0002

@@ -214,6 +214,11 @@ class TestTyping(ActCase):
         root = el(name="edit", automation_id="e")
         with self.patch_children([]), \
              self.patch_read(detailed(root)), self.patch_activate(True), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "_focus_settled", return_value=True), \
+             mock.patch.object(act, "SetCursorPos"), \
+             mock.patch.object(act, "Click"), \
+             mock.patch.object(act, "SendKeys"), \
              mock.patch.object(act.tree, "pattern_detailed",
                                return_value={"ok": False, "reason": "pattern unavailable",
                                              "cause_unknown": True}):
@@ -335,6 +340,237 @@ class TestScrollAndKeys(ActCase):
             result = act.act(1, "key", text="Enter")
         self.assertTrue(result["needs_permission"])
         read.assert_not_called()
+
+
+class TestCursorReachability(ActCase):
+    """A real cursor click lands on whatever window is topmost at that pixel.
+
+    The tool addresses a window; if another window covers the point, the click
+    would act on the wrong application. That must be refused before the cursor
+    moves - this is the same class of rule as "never click the window centre".
+    """
+
+    def patch_owner(self, owner):
+        return mock.patch.object(act.win32, "window_at", return_value=owner)
+
+    def editable(self, *names):
+        return el(name=names[0] if names else "field", automation_id="e",
+                  rect=FakeRect(10, 20, 200, 40))
+
+    def test_a_covered_point_is_refused_before_the_cursor_moves(self):
+        root = self.editable()
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             self.patch_owner(999), \
+             mock.patch.object(act, "SetCursorPos") as cursor, \
+             mock.patch.object(act, "Click") as click:
+            result = act.act(1, "type", target="e", text="x", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "target obstructed")
+        self.assertEqual(result["execution_state"], "not_started")
+        cursor.assert_not_called()
+        click.assert_not_called()
+
+    def test_an_uncovered_point_clicks_the_element_centre(self):
+        # FakeRect is (left, top, right, bottom): [10,20,210,60] -> centre (110,40).
+        root = el(name="field", automation_id="e", rect=FakeRect(10, 20, 210, 60))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             self.patch_owner(1), \
+             mock.patch.object(act, "_focus_settled", return_value=True), \
+             mock.patch.object(act, "SetCursorPos") as cursor, \
+             mock.patch.object(act, "Click") as click, \
+             mock.patch.object(act, "SendKeys"):
+            act.act(1, "type", target="e", text="x", allow_foreground=True)
+        self.assertEqual(cursor.call_args[0], (110, 40))
+        self.assertEqual(click.call_args[0], (110, 40))
+
+    def test_an_owner_of_another_window_is_obstruction(self):
+        """Same process is not enough: a sibling window is still the wrong target."""
+        root = self.editable()
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             self.patch_owner(4242), \
+             mock.patch.object(act, "SetCursorPos") as cursor:
+            result = act.act(1, "type", target="e", text="x", allow_foreground=True)
+        self.assertEqual(result["reason"], "target obstructed")
+        cursor.assert_not_called()
+
+    def test_click_route_also_refuses_an_obstructed_element(self):
+        root = el(name="btn", automation_id="b", rect=FakeRect(0, 0, 100, 30))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             self.patch_owner(777), \
+             mock.patch.object(act, "SetCursorPos") as cursor, \
+             mock.patch.object(act, "Click") as click:
+            result = act.act(1, "click", target="b", allow_foreground=True)
+        self.assertEqual(result["reason"], "target obstructed")
+        cursor.assert_not_called()
+        click.assert_not_called()
+
+
+class TestClickObservation(ActCase):
+    """A semantic click can report success without changing anything.
+
+    Measured on WeChat: LegacyIAccessible.DoDefaultAction and InvokePattern.Invoke
+    both returned True with execution_state=completed while the login page stayed
+    exactly as it was. The tool cannot call that success, and it must not invent
+    a failure either - it reports what it could observe.
+    """
+
+    def test_a_click_whose_control_state_did_not_change_says_so(self):
+        target = el(name="进入微信", automation_id="")
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda el, name: (
+                                   {"ok": True, "value": mock.Mock(
+                                       DoDefaultAction=mock.Mock(return_value=True)),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="进入微信", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["route"], "uia:legacy-default")
+        self.assertFalse(result["effect_verified"])
+        self.assertEqual(result.get("observation"), "no visible change detected")
+
+    def test_a_click_that_changed_the_control_has_no_observation(self):
+        state = {"n": 0}
+        target = el(name="展开", automation_id="")
+
+        class Changing:
+            def DoDefaultAction(self):
+                state["n"] += 1
+                target.Name = "已展开"
+                return True
+
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda el, name: (
+                                   {"ok": True, "value": Changing(),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="展开", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result)
+
+    def test_an_unreadable_state_is_not_reported_as_unchanged(self):
+        """If the control's own name cannot be read, the tool has observed
+        nothing and must not claim "no change"."""
+        target = el(name="x", automation_id="")
+        broken = mock.Mock()
+        broken.DoDefaultAction.return_value = True
+        type(target).__getattribute__
+
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda el, name: (
+                                   {"ok": True, "value": broken,
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})), \
+             mock.patch.object(act, "_state_signature", return_value=None):
+            result = act.act(1, "click", target="x", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result,
+                         "unknown state must not be called an unchanged one")
+
+    def test_the_pointer_route_reports_no_observation(self):
+        root = el(name="btn", automation_id="b", rect=FakeRect(0, 0, 100, 30))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "SetCursorPos"), \
+             mock.patch.object(act, "Click"):
+            result = act.act(1, "click", target="b", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result)
+
+
+class TestFocusSettling(ActCase):
+    """A click is followed by keys, but focus moves a moment later.
+
+    Measured: the first character of a typed string was lost. Fixed sleep was
+    not enough, so the wait is driven by the focus actually arriving.
+    """
+
+    def test_no_keys_until_the_focus_is_reported(self):
+        observed = []
+        with mock.patch.object(act.win32, "focus_window", side_effect=[0, 0, 1]), \
+             mock.patch.object(act, "SendKeys",
+                               side_effect=lambda text, **kw: observed.append(text)), \
+             mock.patch.object(act.time, "sleep"):
+            settled = act._focus_settled(1, timeout_ms=500)
+        self.assertTrue(settled)
+        self.assertEqual(observed, [], "waiting must not type anything")
+
+    def test_focus_that_never_arrives_is_a_refusal(self):
+        with mock.patch.object(act.win32, "focus_window", return_value=0), \
+             mock.patch.object(act.time, "sleep"), \
+             mock.patch.object(act.time, "monotonic", side_effect=[0, 0.1, 0.2, 9, 9]):
+            self.assertFalse(act._focus_settled(1, timeout_ms=500))
+
+    def test_typing_sends_a_leading_key_then_the_text(self):
+        sent = []
+        root = el(name="f", automation_id="f", rect=FakeRect(0, 0, 100, 20))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "_focus_settled", return_value=True), \
+             mock.patch.object(act, "SetCursorPos"), \
+             mock.patch.object(act, "Click"), \
+             mock.patch.object(act, "SendKeys",
+                               side_effect=lambda text, **kw: sent.append(text)):
+            act.act(1, "type", target="f", text="hello", allow_foreground=True)
+        self.assertIn("{RIGHT}", sent, "a leading key must precede the text")
+        self.assertEqual(sent[-1], "hello")
+        # The text is sent once, after the leading key.
+        self.assertEqual(sent.count("hello"), 1)
+
+    def test_a_failed_focus_wait_sends_nothing(self):
+        root = el(name="f", automation_id="f", rect=FakeRect(0, 0, 100, 20))
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "_focus_settled", return_value=False), \
+             mock.patch.object(act, "SetCursorPos"), \
+             mock.patch.object(act, "Click"), \
+             mock.patch.object(act, "SendKeys") as keys:
+            result = act.act(1, "type", target="f", text="hello", allow_foreground=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "target not focused")
+        keys.assert_not_called()
 
 
 class TestInvokePattern(ActCase):

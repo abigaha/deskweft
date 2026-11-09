@@ -365,6 +365,22 @@ def _units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _state_signature(el) -> tuple | None:
+    """What can be cheaply observed about a control, or None if nothing can.
+
+    Used only to say whether *something* changed after a click. None means the
+    control cannot be read back here, and then the tool has observed nothing -
+    which is not the same as having observed no change.
+    """
+    name = getattr(el, "Name", None)
+    if not isinstance(name, str):
+        return None
+    try:
+        return (name, bool(el.IsOffscreen))
+    except Exception:
+        return (name, None)
+
+
 def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, start: float) -> dict:
     """Legacy first (measured not to take the foreground), then the other routes.
 
@@ -389,6 +405,7 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
         member = getattr(result["value"], call, None)
         if not callable(member):
             continue
+        before = _state_signature(el)
         try:
             returned = member()
         except Exception as error:
@@ -399,21 +416,64 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
             return _done(hwnd, "click", target, label, fg_before, start,
                          ok=False, reason="provider reported false",
                          effect_verified=False)
-        return _done(hwnd, "click", target, label, fg_before, start)
+        done = _done(hwnd, "click", target, label, fg_before, start)
+        after = _state_signature(el)
+        # Measured on WeChat: both semantic routes returned True while nothing
+        # moved. Success is reported, but never as an effect.
+        if before is not None and after is not None and before == after:
+            done["observation"] = "no visible change detected"
+        return done
 
     box = hit.get("rect")
     if box and box[2] > 0 and box[3] > 0:
+        x, y = box[0] + box[2] // 2, box[1] + box[3] // 2
         if not win32.activate(hwnd):
             return _fail("could not bring the window to the foreground",
                          f"Windows refused to activate {win32.title(hwnd)!r}; nothing was clicked",
                          fg_before)
-        x, y = box[0] + box[2] // 2, box[1] + box[3] // 2
+        blocked = _reachable(hwnd, x, y, fg_before)
+        if blocked:
+            return blocked
         SetCursorPos(x, y)
         Click(x, y)
         return _done(hwnd, "click", target, "cursor:element-rect", fg_before, start)
     return _fail("control has no clickable area",
                  f"{target!r} exposes no action pattern and reported an empty rectangle",
                  fg_before)
+
+
+def _reachable(hwnd: int, x: int, y: int, fg_before: int) -> dict | None:
+    """Refuse a cursor click that would land on another window.
+
+    A real click goes to whatever is topmost at that pixel, not to the window
+    this tool was addressed at. Same rule as "never click the window centre":
+    acting on the wrong window is worse than reporting the refusal.
+    """
+    owner = win32.window_at(x, y)
+    if owner == hwnd:
+        return None
+    return _fail("target obstructed",
+                 f"the point ({x}, {y}) belongs to window {owner}, not {hwnd}; "
+                 "another window covers the target, so nothing was clicked",
+                 fg_before)
+
+
+def _focus_settled(hwnd: int, timeout_ms: int = 800) -> bool:
+    """Wait until the foreground thread reports a focused control.
+
+    Measured: typing immediately after a click lost the first character, and a
+    fixed sleep did not fix it. The condition worth waiting for is the focus
+    actually arriving, not a guessed duration.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if win32.focus_window():
+            # The focus exists; give the input method a moment to switch over.
+            time.sleep(0.1)
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
 
 
 def _type_uia(hwnd: int, hit: dict, el, target: str | dict, text: str,
@@ -463,10 +523,19 @@ def _type_uia(hwnd: int, hit: dict, el, target: str | dict, text: str,
                      f"Windows refused to activate {win32.title(hwnd)!r}; nothing was typed",
                      fg_before)
     x, y = box[0] + box[2] // 2, box[1] + box[3] // 2
+    blocked = _reachable(hwnd, x, y, fg_before)
+    if blocked:
+        return blocked
     SetCursorPos(x, y)
     Click(x, y)
-    time.sleep(0.12)
+    if not _focus_settled(hwnd):
+        return _fail("target not focused",
+                     f"no control in {win32.title(hwnd)!r} took the focus after the click; "
+                     "nothing was typed", fg_before)
     SendKeys("{Ctrl}a", interval=0.01, waitTime=0.1)
+    # A leading key absorbs the keystroke that used to be lost while the field
+    # finished taking focus; it moves no text because the selection is empty.
+    SendKeys("{RIGHT}", interval=0.01, waitTime=0.05)
     SendKeys(text, interval=0.01, waitTime=0.2)
 
     again = tree.pattern_detailed(el, "ValuePattern")
