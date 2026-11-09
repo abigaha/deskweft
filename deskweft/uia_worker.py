@@ -390,9 +390,13 @@ def _spawn() -> dict:
             failure.retryable = True
         raise
     except Exception as error:
-        _startup_reap(proc, parent)
-        raise StartupFailure(f"{type(error).__name__}: {error}",
-                             transport_ready=handoff) from None
+        clean = _startup_reap(proc, parent)
+        failure = StartupFailure(f"{type(error).__name__}: {error}",
+                                 transport_ready=handoff)
+        failure.retryable = clean
+        raise failure from None
+    finally:
+        child.close()
 
 
 def _startup_reap(proc, channel) -> bool:
@@ -426,13 +430,14 @@ def _reap(proc, channel) -> tuple[float, bool]:
     alive = False
     if proc is not None:
         try:
-            if proc.is_alive():
-                proc.terminate()
-            proc.join(CLOSE_GRACE_MS / 1000)
-            if proc.is_alive():
-                proc.kill()
+            if proc.pid is not None:
+                if proc.is_alive():
+                    proc.terminate()
                 proc.join(CLOSE_GRACE_MS / 1000)
-            alive = bool(proc.is_alive())
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(CLOSE_GRACE_MS / 1000)
+                alive = bool(proc.is_alive())
         except Exception:
             alive = True
         if not alive:

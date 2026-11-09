@@ -225,6 +225,21 @@ class TestUnversioned(MemoryCase):
     def test_string_unversioned_is_not_a_version(self):
         self.assertFalse(self.write_plans(version="unversioned")["ok"])
 
+    def test_missing_unversioned_does_not_return_a_trusted_known_version(self):
+        stored = self.write_plans(version="9.9.22")
+        revision = stored["revision"]
+        self.assertTrue(memory.approve("QQ", "9.9.22", "B", revision)["ok"])
+        self.assertTrue(memory.confirm_proven("QQ", "9.9.22", "B", revision)["ok"])
+        known = memory.recall("qq@9.9.22")["matches"][0]["plans"][0]
+        self.assertEqual(known["rank"], 3)
+
+        for query in ("qq@unversioned", "QQ@UNVERSIONED"):
+            with self.subTest(query=query):
+                result = memory.recall(query)
+                self.assertTrue(result["ok"], result)
+                self.assertFalse(result["exact"])
+                self.assertEqual(result["matches"], [])
+
 
 class TestMatching(MemoryCase):
     def setUp(self):

@@ -101,6 +101,15 @@ class TestDesktopTool(unittest.TestCase):
         self.assertIn("foreground_before", result)
         self.assertIn("foreground_changed", result)
 
+    def test_foreground_sample_surrounds_the_desktop_operation(self):
+        with mock.patch.object(server, "_desktop_session") as session, \
+             mock.patch.object(server.win32, "foreground", side_effect=[11, 22, 22]):
+            session.show.return_value = {"ok": True, "visible_desktop": "x"}
+            result = server.private_desktop("show", allow_foreground=True)
+        self.assertEqual(result["foreground_before"], 11)
+        self.assertEqual(result["foreground_after"], 22)
+        self.assertTrue(result["foreground_changed"])
+
 
 if __name__ == "__main__":
     unittest.main()

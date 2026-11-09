@@ -189,6 +189,16 @@ class TestWorkerRouting(unittest.TestCase):
                 result = self.run_tool("open_app", command="x.exe")
         self.assertIn("foreground_before", result)
 
+    def test_open_app_preserves_the_launch_foreground_change(self):
+        payload = {"ok": True, "hidden_windows": [], "foreground_before": 11,
+                   "foreground_after": 22, "foreground_preserved": False}
+        with mock.patch.object(server, "_launch", return_value=payload), \
+             mock.patch.object(server.win32, "foreground", return_value=22):
+            result = self.run_tool("open_app", command="x.exe")
+        self.assertEqual(result["foreground_before"], 11)
+        self.assertEqual(result["foreground_after"], 22)
+        self.assertTrue(result["foreground_changed"])
+
     def test_foreground_fields_are_added_to_a_window_tool(self):
         # Mock the worker, not _worker_call: adding the foreground sample to
         # every window result is exactly what _worker_call exists to do.

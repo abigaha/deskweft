@@ -255,6 +255,46 @@ class TestCall(WorkerCase):
 
 
 class TestStartup(WorkerCase):
+    def test_process_start_failure_closes_both_socket_ends(self):
+        processes = [uia_worker.multiprocessing.get_context("spawn").Process()
+                     for _ in range(2)]
+        channels = [socket.socketpair() for _ in range(2)]
+        for proc in processes:
+            self.addCleanup(proc.close)
+        for pair in channels:
+            for channel in pair:
+                self.addCleanup(channel.close)
+        context = mock.Mock()
+        context.Process.side_effect = processes
+        with mock.patch.object(uia_worker.multiprocessing, "get_context", return_value=context), \
+             mock.patch.object(uia_worker.socket, "socketpair", side_effect=channels), \
+             mock.patch.object(type(processes[0]), "start", side_effect=OSError("spawn failed")):
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        for result in (first, second):
+            self.assertEqual(result["execution_state"], "not_started")
+            self.assertTrue(result["retry_safe"])
+        self.assertIsNone(uia_worker._unavailable)
+        self.assertEqual(context.Process.call_count, 2)
+        for pair in channels:
+            for channel in pair:
+                self.assertEqual(channel.fileno(), -1)
+
+    def test_real_spawn_timeout_with_clean_reap_can_retry(self):
+        proc = mock.Mock()
+        context = mock.Mock()
+        context.Process.return_value = proc
+        with mock.patch.object(uia_worker.multiprocessing, "get_context", return_value=context), \
+             mock.patch.object(uia_worker, "_recv_frame", side_effect=TimeoutError("cold start")), \
+             mock.patch.object(uia_worker, "_reap", return_value=(0.0, False)):
+            first = uia_worker.call("see", {"hwnd": 1}, 1000)
+            second = uia_worker.call("see", {"hwnd": 1}, 1000)
+        self.assertFalse(first["ok"])
+        self.assertTrue(first["retry_safe"])
+        self.assertEqual(second["execution_state"], "not_started")
+        self.assertEqual(proc.start.call_count, 2)
+        self.assertIsNone(uia_worker._unavailable)
+
     def test_missing_transport_ready_marks_the_service_unavailable(self):
         proc = mock.Mock()
         proc.is_alive.return_value = False

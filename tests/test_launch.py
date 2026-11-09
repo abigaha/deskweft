@@ -150,6 +150,19 @@ class TestOwnership(LaunchCase):
         self.assertTrue(hidden)
         self.assertEqual(hidden[0]["ownership_basis"], "observed_descendant")
 
+    def test_a_reused_root_pid_does_not_own_new_descendant_windows(self):
+        def recycle():
+            self.pids[500] = 4000
+            self.pids[600] = 5000
+            self.windows_after[:] = [(300, 600, "Other", "Unrelated child")]
+            return self.parents
+
+        with mock.patch.object(launch, "_snapshot_parents", side_effect=recycle):
+            result = self.run_launch()
+        self.assertTrue(self._shown(300))
+        self.assertFalse(result["target_window_confirmed"])
+        self.assertEqual(result["visibility_control"], "unconfirmed")
+
     def test_unrelated_new_window_is_never_touched(self):
         def spawn():
             self.windows_after.append((400, 900, "Notepad", "Someone else"))
@@ -250,6 +263,68 @@ class TestForeground(LaunchCase):
         self.assertTrue(all(c.args[0] == 100 for c in force.call_args_list),
                         force.call_args_list)
 
+    def test_a_window_that_reappears_is_hidden_again_and_focus_restored(self):
+        polls = 0
+
+        def windows():
+            nonlocal polls
+            polls += 1
+            if polls == 3:
+                self.visible[200] = True
+                self.foreground = 200
+            return list(self.baseline) + [w[0] for w in self.windows_after]
+
+        def spawn():
+            self.windows_after.append((200, 500, "Win32Window", "New"))
+            self.foreground = 200
+
+        def restore(hwnd):
+            self.foreground = hwnd
+            return True
+
+        with mock.patch.object(launch, "_all_top_level_windows", side_effect=windows), \
+             mock.patch.object(launch, "force_foreground", side_effect=restore):
+            result = self.run_launch(spawn=spawn)
+        self.assertFalse(self.visible[200])
+        self.assertTrue(result["foreground_preserved"], result)
+        self.assertEqual(len(result["hidden_windows"]), 1)
+        self.assertFalse(result["hidden_windows"][0]["still_visible"])
+        self.assertEqual(result["visibility_control"], "applied")
+
+    def test_a_reused_window_handle_is_not_hidden_for_its_previous_owner(self):
+        polls = 0
+
+        def windows():
+            nonlocal polls
+            polls += 1
+            if polls == 3:
+                self.windows_after[:] = [(200, 900, "Other", "Reused")]
+                self.visible[200] = True
+                self.foreground = 200
+            return list(self.baseline) + [w[0] for w in self.windows_after]
+
+        def spawn():
+            self.windows_after.append((200, 500, "Win32Window", "New"))
+
+        with mock.patch.object(launch, "_all_top_level_windows", side_effect=windows), \
+             mock.patch.object(launch, "force_foreground") as restore:
+            result = self.run_launch(spawn=spawn)
+        self.assertTrue(self.visible[200])
+        self.assertFalse(result["foreground_preserved"])
+        restore.assert_not_called()
+
+    def test_a_window_still_visible_after_hiding_is_not_reported_applied(self):
+        def spawn():
+            self.windows_after.append((200, 500, "Win32Window", "New"))
+
+        # The app reappears after the final hiding pass, before result sampling.
+        with mock.patch.object(launch.time, "time", side_effect=[0, 2, 2]), \
+             mock.patch.object(launch.user32, "IsWindowVisible", side_effect=[0, 0, 1]):
+            result = self.run_launch(spawn=spawn)
+        self.assertTrue(result["hidden_windows"][0]["hide_succeeded"])
+        self.assertTrue(result["hidden_windows"][0]["still_visible"])
+        self.assertEqual(result["visibility_control"], "partial")
+
 
 class TestFailures(LaunchCase):
     def setUp(self):
@@ -309,6 +384,27 @@ class TestFailures(LaunchCase):
 
 
 class TestProcessQueries(unittest.TestCase):
+    def test_a_reused_parent_pid_does_not_make_an_unrelated_process_owned(self):
+        identities = {500: 1000, 600: 4000, 700: 2000}
+        with mock.patch.object(launch, "_snapshot_parents",
+                               return_value={500: 1, 600: 500, 700: 600}), \
+             mock.patch.object(launch, "_process_identity",
+                               side_effect=lambda pid: {"pid": pid,
+                                                        "created": identities[pid]}):
+            owned = launch._owned_processes(500, {"pid": 500, "created": 1000})
+        self.assertIn(600, owned)
+        self.assertNotIn(700, owned)
+
+    def test_a_current_descendant_chain_is_owned(self):
+        identities = {500: 1000, 600: 2000, 700: 3000}
+        with mock.patch.object(launch, "_snapshot_parents",
+                               return_value={500: 1, 600: 500, 700: 600}), \
+             mock.patch.object(launch, "_process_identity",
+                               side_effect=lambda pid: {"pid": pid,
+                                                        "created": identities[pid]}):
+            owned = launch._owned_processes(500, {"pid": 500, "created": 1000})
+        self.assertEqual(set(owned), {500, 600, 700})
+
     def test_missing_pid_has_no_identity(self):
         self.assertIsNone(launch._process_identity(0))
         self.assertIsNone(launch._process_identity(999999))

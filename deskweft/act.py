@@ -398,13 +398,7 @@ def _state_signature(el) -> tuple | None:
 
 
 def screen_changed(hwnd: int, before: bytes | None) -> bool | None:
-    """Did the window actually redraw? None when it cannot be compared.
-
-    Measured on QQ 9.9.37: LegacyIAccessible.DoDefaultAction returns True with
-    QQ in the foreground and changes exactly zero pixels, while a real cursor
-    click on the same rectangle changes ~56k. Element counts did not catch that
-    (316 -> 166 while nothing on screen moved), so the capture is the evidence.
-    """
+    """Compare two PrintWindow samples, which may contain cached or incomplete frames."""
     if before is None:
         return None
     try:
@@ -461,22 +455,18 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
         done = _done(hwnd, "click", target, label, fg_before, start)
         after = _state_signature(el)
         size_after = tree_size(hwnd)
-        redrew = screen_changed(hwnd, pixels_before)
-        # Measured on QQ 9.9.37: this route returns True without drawing
-        # anything, even with the window in front. A capture that did not change
-        # is the strongest evidence available here, and it beats element counts,
-        # which moved (316 -> 166) while the screen did not.
-        if redrew is False:
-            done["observation"] = "no visible change detected"
-            done["route_effect"] = "not observed: the window did not redraw"
-        elif redrew is True:
-            done["route_effect"] = "window redrew"
+        capture_changed = screen_changed(hwnd, pixels_before)
+        if capture_changed is not None:
+            done["observation_source"] = "PrintWindow"
+            done["observation"] = ("captured frames differ" if capture_changed
+                                   else "captured frames are identical")
+            done["route_effect"] = "business effect unverified"
         elif (before is not None and after is not None and before == after
               and size_before is not None and size_after is not None
               and size_before == size_after):
-            # No capture available: fall back to the weaker signals, and say so.
-            done["observation"] = "no visible change detected"
-            done["route_effect"] = "unknown: compared element state only"
+            done["observation_source"] = "UIA"
+            done["observation"] = "element state and tree size are unchanged"
+            done["route_effect"] = "business effect unverified"
         return done
 
     box = hit.get("rect")
@@ -513,22 +503,31 @@ def _reachable(hwnd: int, x: int, y: int, fg_before: int) -> dict | None:
                  fg_before)
 
 
-def _focus_settled(hwnd: int, timeout_ms: int = 800) -> bool:
-    """Wait until the foreground thread reports a focused control.
-
-    Measured: typing immediately after a click lost the first character, and a
-    fixed sleep did not fix it. The condition worth waiting for is the focus
-    actually arriving, not a guessed duration.
-    """
+def _focus_settled(hwnd: int, timeout_ms: int = 800, *, el=None) -> bool:
+    """Wait for stable focus in this window and, when supplied, on this control."""
     deadline = time.monotonic() + timeout_ms / 1000
+    settled_since = None
     while True:
-        if win32.focus_window():
-            # The focus exists; give the input method a moment to switch over.
-            time.sleep(0.1)
-            return True
-        if time.monotonic() >= deadline:
+        try:
+            focused_hwnd = win32.focus_window()
+            focused = (bool(focused_hwnd) and win32.foreground() == hwnd
+                       and (focused_hwnd == hwnd or win32.user32.GetAncestor(
+                           focused_hwnd, win32.GA_ROOT) == hwnd)
+                       and (el is None or el.HasKeyboardFocus is True))
+        except Exception:
+            focused = False
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
             return False
-        time.sleep(0.02)
+        if focused:
+            if settled_since is None:
+                settled_since = now
+            elif now - settled_since >= 0.1:
+                return True
+        else:
+            settled_since = None
+        time.sleep(min(0.02, remaining))
 
 
 def _type_uia(hwnd: int, hit: dict, el, target: str | dict, text: str,
@@ -583,23 +582,31 @@ def _type_uia(hwnd: int, hit: dict, el, target: str | dict, text: str,
         return blocked
     SetCursorPos(x, y)
     Click(x, y)
-    if not _focus_settled(hwnd):
+    if not _focus_settled(hwnd, el=el):
         return _fail("target not focused",
-                     f"no control in {win32.title(hwnd)!r} took the focus after the click; "
+                     f"{target!r} in {win32.title(hwnd)!r} did not take the focus after the click; "
                      "nothing was typed", fg_before)
     SendKeys("{Ctrl}a", interval=0.01, waitTime=0.1)
-    # A leading key absorbs the keystroke that used to be lost while the field
-    # finished taking focus; it moves no text because the selection is empty.
-    SendKeys("{RIGHT}", interval=0.01, waitTime=0.05)
-    SendKeys(text, interval=0.01, waitTime=0.2)
+    if not _focus_settled(hwnd, el=el):
+        return _fail("target not focused",
+                     f"{target!r} lost keyboard focus after selecting its text; nothing was typed",
+                     fg_before, state="completed")
+    literal = "".join("{" + char + "}" if char in "{}" else char for char in text)
+    SendKeys(literal or "{Delete}", interval=0.01, waitTime=0.2)
 
     again = tree.pattern_detailed(el, "ValuePattern")
     if not again["ok"]:
         return _done(hwnd, "type", target, "cursor:click-and-type", fg_before, start,
                      effect_verified=False, verification_reason="readback unavailable")
-    if again["value"].Value != text:
+    try:
+        landed = again["value"].Value
+    except Exception as error:
+        return _done(hwnd, "type", target, "cursor:click-and-type", fg_before, start,
+                     ok=False, reason="readback unavailable", retry_safe=False,
+                     verification_reason=f"{type(error).__name__}: {error}")
+    if landed != text:
         return _fail("text readback mismatch",
-                     f"{target!r} holds {str(again['value'].Value)[:80]!r} after typing",
+                     f"{target!r} holds {str(landed)[:80]!r} after typing",
                      fg_before, state="completed")
     return _done(hwnd, "type", target, "cursor:click-and-type", fg_before, start,
                  effect_verified=True)
@@ -667,6 +674,10 @@ def _keys(hwnd: int, keys: str, fg_before: int, start: float) -> dict:
         return _fail("target not focused",
                      f"SetFocus on {win32.title(hwnd)!r} failed: "
                      f"{type(error).__name__}: {error}; nothing was sent", fg_before)
+    if not _focus_settled(hwnd):
+        return _fail("target not focused",
+                     f"{win32.title(hwnd)!r} did not retain keyboard focus; nothing was sent",
+                     fg_before)
     SendKeys(_normalise_keys(keys), interval=0.01, waitTime=0.2)
     return _done(hwnd, "key", keys, "cursor:keys", fg_before, start)
 

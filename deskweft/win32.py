@@ -564,16 +564,15 @@ def _post_text(hwnd: int, msg: int, wait: bool, timeout_ms: int, text: str | Non
                max_chars: int, before: int) -> dict:
     """WM_GETTEXT/WM_SETTEXT with a service-owned buffer; no pointer is exposed."""
     if msg == WM_GETTEXT:
-        return _read_text(hwnd, WM_GETTEXT, 0, max_chars, timeout_ms, before)
+        return _read_text(hwnd, WM_GETTEXT, max_chars, timeout_ms, before)
     return _write_text(hwnd, text, _payload_units(text), timeout_ms, max_chars, before)
 
 
-def _read_text(hwnd: int, msg: int, wp: int, capacity: int, timeout_ms: int,
+def _read_text(hwnd: int, msg: int, capacity: int, timeout_ms: int,
                before: int, *, internal: bool = False) -> dict:
     """Read text into a buffer this service owns for the whole call."""
     buf = ctypes.create_unicode_buffer(capacity + 1)
-    argument = wp if internal else capacity
-    completed, result, error = _send_scalar(hwnd, msg, argument,
+    completed, result, error = _send_scalar(hwnd, msg, capacity + 1,
                                             ctypes.cast(buf, ctypes.c_void_p).value,
                                             timeout_ms)
     if not completed:
@@ -632,7 +631,7 @@ def _write_text(hwnd: int, text: str, units: int, timeout_ms: int, max_chars: in
     # n+2 units: enough to see one trailing unit beyond the input, so a longer
     # existing value shows up as a mismatch instead of a silent match.
     capacity = min(units + 1, _MAX_UTF16 + 2)
-    back = _read_text(hwnd, WM_GETTEXT, capacity, capacity, remaining, before,
+    back = _read_text(hwnd, WM_GETTEXT, capacity, remaining, before,
                       internal=True)
     out.update(_foreground_fields(before))
     if not back["ok"]:

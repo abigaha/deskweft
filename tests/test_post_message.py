@@ -19,6 +19,12 @@ BM_GETCHECK = 0x00F0
 CB_GETCURSEL = 0x0147
 
 
+def _copy_gettext(text, wparam, lparam):
+    raw = text.encode("utf-16-le", "surrogatepass")[:max(0, wparam - 1) * 2]
+    ctypes.memmove(lparam, raw + b"\x00\x00", len(raw) + 2)
+    return len(raw) // 2
+
+
 class PostCase(unittest.TestCase):
     def setUp(self):
         for name, value in (("title", "Window"), ("class_name", "Edit"), ("foreground", 1)):
@@ -146,13 +152,12 @@ class TestValidation(PostCase):
 
 
 class TestManagedText(PostCase):
-    def fake_send_text(self, written=None, result=1, completed=True, error=0, capture=None):
+    def fake_send_text(self, written=None, result=None, completed=True, error=0, capture=None):
         def send(hwnd, msg, wp, lp, timeout_ms):
             if capture is not None:
                 capture.update(hwnd=hwnd, msg=msg, wp=wp, lp=lp, timeout_ms=timeout_ms)
-            if written is not None:
-                ctypes.memmove(lp, written, (len(written) + 1) * ctypes.sizeof(ctypes.c_wchar))
-            return int(completed), result, error
+            copied = _copy_gettext(written, wp, lp) if written is not None and msg == WM_GETTEXT else 1
+            return int(completed), copied if result is None else result, error
 
         return mock.patch.object(win32, "_send_scalar", side_effect=send)
 
@@ -179,6 +184,29 @@ class TestManagedText(PostCase):
             result = win32.post_message(self.child, WM_GETTEXT, wait=True)
         self.assertTrue(result["ok"])
         self.assertEqual(result["text"], "")
+
+    def test_gettext_uses_its_advertised_character_capacity_and_flags_truncation(self):
+        for capacity, wanted in ((1, "a"), (3, "abc")):
+            with self.subTest(capacity=capacity), self.fake_send_text("abcdef"):
+                result = win32.post_message(self.child, WM_GETTEXT,
+                                            wait=True, max_chars=capacity)
+                self.assertEqual(result["text"], wanted)
+                self.assertTrue(result["possibly_truncated"], result)
+
+    def test_gettext_repairs_and_flags_a_truncated_surrogate_pair(self):
+        with self.fake_send_text("a🙂b"):
+            result = win32.post_message(self.child, WM_GETTEXT, wait=True, max_chars=2)
+        self.assertEqual(result["text"], "a�")
+        self.assertTrue(result["text_repaired"], result)
+        self.assertTrue(result["possibly_truncated"], result)
+
+    def test_settext_does_not_verify_only_a_matching_prefix(self):
+        for requested, actual in (("abc", "abcdef"), ("", "kept")):
+            with self.subTest(requested=requested), self.fake_send_text(actual):
+                result = win32.post_message(self.child, WM_SETTEXT, text=requested,
+                                            allow_foreground=True, wait=True)
+                self.assertFalse(result["effect_verified"], result)
+                self.assertEqual(result.get("verification_reason"), "readback incomplete")
 
     def test_gettext_result_beyond_capacity_is_rejected(self):
         with self.fake_send_text("", result=99):
@@ -239,9 +267,7 @@ class TestManagedText(PostCase):
             seen.append((msg, timeout_ms))
             if msg == WM_SETTEXT:
                 return 1, 1, 0
-            ctypes.memmove(lp, "new text",
-                           (len("new text") + 1) * ctypes.sizeof(ctypes.c_wchar))
-            return 1, 8, 0
+            return 1, _copy_gettext("new text", wp, lp), 0
 
         with mock.patch.object(win32, "_send_scalar", side_effect=send), \
              mock.patch.object(win32.time, "monotonic", side_effect=[0.0, 0.1, 0.9]):
@@ -257,8 +283,7 @@ class TestManagedText(PostCase):
         def send(hwnd, msg, wp, lp, timeout_ms):
             if msg == WM_SETTEXT:
                 return 1, 1, 0
-            ctypes.memmove(lp, "other", 6 * ctypes.sizeof(ctypes.c_wchar))
-            return 1, 5, 0
+            return 1, _copy_gettext("other", wp, lp), 0
 
         with mock.patch.object(win32, "_send_scalar", side_effect=send):
             result = win32.post_message(self.child, WM_SETTEXT, text="wanted",
@@ -283,8 +308,7 @@ class TestManagedText(PostCase):
         def send(hwnd, msg, wp, lp, timeout_ms):
             if msg == WM_SETTEXT:
                 return 1, 1, 0
-            ctypes.memmove(lp, long_text, (len(long_text) + 1) * ctypes.sizeof(ctypes.c_wchar))
-            return 1, len(long_text), 0
+            return 1, _copy_gettext(long_text, wp, lp), 0
 
         with mock.patch.object(win32, "_send_scalar", side_effect=send):
             result = win32.post_message(self.child, WM_SETTEXT, text=long_text,
@@ -298,8 +322,7 @@ class TestManagedText(PostCase):
         def send(hwnd, msg, wp, lp, timeout_ms):
             if msg == WM_SETTEXT:
                 return 1, 1, 0
-            ctypes.memmove(lp, written, (len(written) + 1) * ctypes.sizeof(ctypes.c_wchar))
-            return 1, len(written), 0
+            return 1, _copy_gettext(written, wp, lp), 0
 
         with mock.patch.object(win32, "_send_scalar", side_effect=send):
             result = win32.post_message(self.child, WM_SETTEXT, text="字" * 5001,

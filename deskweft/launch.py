@@ -235,7 +235,9 @@ def _owned_processes(root_pid: int, root_identity: dict) -> dict[int, dict]:
     """The launched process and every descendant whose identity still matches."""
     owned = {root_pid: {"created": root_identity["created"], "basis": "direct_process"}}
     parents = _snapshot_parents()
-    if not parents:
+    current_root = _process_identity(root_pid)
+    if not parents or (current_root is not None
+                       and current_root["created"] != root_identity["created"]):
         return owned
     for pid in list(parents):
         if pid == root_pid or pid in owned:
@@ -245,9 +247,14 @@ def _owned_processes(root_pid: int, root_identity: dict) -> dict[int, dict]:
         identity = _process_identity(pid)
         if identity is None:
             continue
-        # A child of the right parent that started before the launch cannot be
-        # ours; the parent link alone is not ownership.
-        if identity["created"] < root_identity["created"]:
+        # A reused parent PID must not make its older, unrelated children ours.
+        current, created = parents.get(pid), identity["created"]
+        while current != root_pid:
+            parent = _process_identity(current)
+            if parent is None or parent["created"] > created:
+                break
+            current, created = parents.get(current), parent["created"]
+        if current != root_pid or created < root_identity["created"]:
             continue
         owned[pid] = {"created": identity["created"], "basis": "observed_descendant"}
     return owned
@@ -314,8 +321,7 @@ def launch(
     if root_identity is None:
         warnings.append("process identity unreadable: the launch's windows cannot be confirmed")
 
-    hidden: list[dict] = []
-    hidden_hwnds: set[int] = set()
+    hidden: dict[int, dict] = {}
     candidates: dict[int, dict] = {}
     candidates_truncated = False
     contested = 0
@@ -332,7 +338,7 @@ def launch(
                  if root_identity else {})
         owned_hwnds: set[int] = set()
         for hwnd in _all_top_level_windows():
-            if hwnd in baseline or hwnd in hidden_hwnds:
+            if hwnd in baseline:
                 continue
             record = _owned_window(hwnd, baseline, owned) if root_identity else None
             if record is None:
@@ -347,11 +353,12 @@ def launch(
                 elif hwnd not in candidates:
                     candidates_truncated = True
                 continue
-            appeared = True
             owned_hwnds.add(hwnd)
+            if hwnd in hidden and not user32.IsWindowVisible(hwnd):
+                continue
+            appeared = True
             if not hide_new_windows:
                 continue
-            hidden_hwnds.add(hwnd)
             succeeded = _hide(hwnd)
             if not succeeded:
                 warnings.append(f"hide failed for hwnd {hwnd}")
@@ -362,7 +369,7 @@ def launch(
                     "hide_succeeded": succeeded}
             item["still_visible"] = (bool(user32.IsWindowVisible(hwnd))
                                      if user32.IsWindow(hwnd) else None)
-            hidden.append(item)
+            hidden[hwnd] = item
 
         if keep_foreground and fg_before and win32.foreground() != fg_before:
             if _may_restore(fg_before, fg_identity, owned_hwnds):
@@ -383,12 +390,13 @@ def launch(
             break
         time.sleep(_SETTLE_POLL)
 
-    for item in hidden:
+    for item in hidden.values():
         item["still_visible"] = (bool(user32.IsWindowVisible(item["hwnd"]))
                                  if user32.IsWindow(item["hwnd"]) else None)
 
     fg_after = win32.foreground()
-    applied = [item for item in hidden if item["hide_succeeded"]]
+    applied = [item for item in hidden.values()
+               if item["hide_succeeded"] and item["still_visible"] is not True]
     if not hide_new_windows:
         control = "not_requested"
     elif not hidden:
@@ -401,7 +409,7 @@ def launch(
         "ok": True,
         "pid": root_pid,
         "command": cmd,
-        "hidden_windows": hidden,
+        "hidden_windows": list(hidden.values()),
         "foreground_before": fg_before,
         "foreground_before_title": title_before[:60],
         "foreground_after": fg_after,

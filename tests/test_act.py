@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from deskweft import act, tree
+from windows_mcp.uia import core
 from test_tree import FakeElement, FakeRect
 
 
@@ -60,7 +61,8 @@ def _control(name="one", handle=1):
 
 class ActCase(unittest.TestCase):
     def setUp(self):
-        for name, value in (("title", "Window"), ("foreground", 1)):
+        for name, value in (("title", "Window"), ("foreground", 1),
+                            ("focus_window", 1), ("grab", None)):
             patch = mock.patch.object(act.win32, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
@@ -200,6 +202,23 @@ class TestChildResolution(ActCase):
 
 
 class TestTyping(ActCase):
+    def cursor_type(self, text, character_input, key_input):
+        root = el(name="edit", automation_id="e")
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "_focus_settled", return_value=True), \
+             mock.patch.object(act, "SetCursorPos"), \
+             mock.patch.object(act, "Click"), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             mock.patch.object(core, "SendUnicodeChar", side_effect=character_input), \
+             mock.patch.object(core, "keybd_event", side_effect=key_input), \
+             mock.patch.object(core, "_VKtoSC", return_value=0), \
+             mock.patch.object(core.time, "sleep"):
+            return act.act(1, "type", target="e", text=text, allow_foreground=True)
+
     def test_native_type_uses_the_managed_helper_and_verifies(self):
         kids = [{"hwnd": 5, "class": "Edit", "text": "", "rect": [0, 0, 9, 9]}]
         with self.patch_children(kids), \
@@ -226,6 +245,49 @@ class TestTyping(ActCase):
         self.assertFalse(result["effect_verified"])
         self.assertEqual(result.get("verification_reason"), "readback unavailable")
 
+    def test_cursor_typing_keeps_braces_and_shortcut_names_literal(self):
+        for text in ('safe{Alt}{F4}', '{"name": "value"}', "{} { } (text)"):
+            with self.subTest(text=text):
+                typed = []
+                pressed = []
+                try:
+                    result = self.cursor_type(
+                        text, lambda char, mode: typed.append(char),
+                        lambda vk, *rest: pressed.append(vk))
+                except ValueError as error:
+                    self.fail(f"literal text was parsed as key syntax: {error}")
+                self.assertTrue(result["ok"], result)
+                self.assertEqual("".join(typed), text)
+                self.assertNotIn(0x12, pressed, "literal text must not press Alt")
+                self.assertNotIn(0x73, pressed, "literal text must not press F4")
+
+    def test_cursor_typing_replaces_the_existing_value(self):
+        for replacement in ("new-value", ""):
+            with self.subTest(replacement=replacement):
+                state = {"text": "old-value", "selected": False}
+                held = set()
+
+                def key_input(vk, scan, flags, extra):
+                    if flags & 2:
+                        held.discard(vk)
+                        return
+                    held.add(vk)
+                    if vk == 0x41 and 0x11 in held:  # Ctrl+A selects the existing value.
+                        state["selected"] = True
+                    elif vk == 0x27:  # Right collapses the selection at its end.
+                        state["selected"] = False
+                    elif vk == 0x2E and state["selected"]:
+                        state["text"] = ""
+                        state["selected"] = False
+
+                def character_input(char, mode):
+                    state["text"] = char if state["selected"] else state["text"] + char
+                    state["selected"] = False
+
+                result = self.cursor_type(replacement, character_input, key_input)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(state["text"], replacement)
+
     def test_readback_mismatch_is_an_explicit_failure(self):
         root = el(name="edit", automation_id="e")
         value = mock.Mock()
@@ -239,6 +301,32 @@ class TestTyping(ActCase):
             result = act.act(1, "type", target="e", text="wanted", allow_foreground=True)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "text readback mismatch")
+
+    def test_cursor_readback_failures_preserve_the_completed_input_result(self):
+        for values, reason in (([RuntimeError("provider lost")], "readback unavailable"),
+                               (["other", RuntimeError("read twice")], "text readback mismatch")):
+            with self.subTest(reason=reason):
+                root = el(name="edit", automation_id="e")
+                value = mock.Mock()
+                type(value).Value = mock.PropertyMock(side_effect=values)
+                sent = []
+                with self.patch_children([]), self.patch_read(detailed(root)), \
+                     self.patch_activate(True), \
+                     mock.patch.object(act.win32, "window_at", return_value=1), \
+                     mock.patch.object(act, "_focus_settled", return_value=True), \
+                     mock.patch.object(act, "SetCursorPos"), mock.patch.object(act, "Click"), \
+                     mock.patch.object(act, "SendKeys", side_effect=lambda text, **kw: sent.append(text)), \
+                     mock.patch.object(act.tree, "pattern_detailed", side_effect=[
+                         {"ok": False, "reason": "pattern unavailable", "cause_unknown": True},
+                         {"ok": True, "value": value, "canonical": "ValuePattern",
+                          "pattern_id": 10002}]):
+                    result = act.act(1, "type", target="e", text="wanted", allow_foreground=True)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(result["execution_state"], "completed")
+                self.assertFalse(result["effect_verified"])
+                self.assertFalse(result["retry_safe"])
+                self.assertEqual(sent, ["{Ctrl}a", "wanted"])
 
     def test_typing_never_reaches_the_window_centre(self):
         root = el(name="edit", automation_id="e", rect=FakeRect(0, 0, 0, 0))
@@ -447,12 +535,10 @@ class TestClickObservation(ActCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["route"], "uia:legacy-default")
         self.assertFalse(result["effect_verified"])
-        self.assertEqual(result.get("observation"), "no visible change detected")
+        self.assertEqual(result.get("observation"), "element state and tree size are unchanged")
+        self.assertEqual(result.get("observation_source"), "UIA")
 
-    def test_a_click_that_did_not_redraw_the_window_says_so(self):
-        """Measured on QQ 9.9.37: DoDefaultAction returns True with the window in
-        front and changes zero pixels. Element counts missed it, so the capture is
-        the evidence."""
+    def test_identical_captures_report_only_the_sampled_frames(self):
         target = el(name="联系人", automation_id="")
         with self.patch_children([]), self.patch_read(detailed(target)), \
              mock.patch.object(act, "ControlFromHandle", return_value=target), \
@@ -469,10 +555,12 @@ class TestClickObservation(ActCase):
                                          "cause_unknown": True})):
             result = act.act(1, "click", target="联系人", allow_foreground=True)
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["observation"], "no visible change detected")
-        self.assertIn("did not redraw", result["route_effect"])
+        self.assertEqual(result["observation"], "captured frames are identical")
+        self.assertEqual(result.get("observation_source"), "PrintWindow")
+        self.assertEqual(result["route_effect"], "business effect unverified")
+        self.assertFalse(result["effect_verified"])
 
-    def test_a_click_that_redrew_the_window_is_reported_as_such(self):
+    def test_different_captures_do_not_verify_the_business_effect(self):
         target = el(name="联系人", automation_id="")
         grabs = iter([(b"before", 10, 10), (b"after", 10, 10)])
         with self.patch_children([]), self.patch_read(detailed(target)), \
@@ -490,8 +578,36 @@ class TestClickObservation(ActCase):
                                          "cause_unknown": True})):
             result = act.act(1, "click", target="联系人", allow_foreground=True)
         self.assertTrue(result["ok"], result)
-        self.assertNotIn("observation", result)
-        self.assertEqual(result["route_effect"], "window redrew")
+        self.assertEqual(result.get("observation"), "captured frames differ")
+        self.assertEqual(result.get("observation_source"), "PrintWindow")
+        self.assertEqual(result["route_effect"], "business effect unverified")
+        self.assertFalse(result["effect_verified"])
+
+    def test_a_cached_frame_does_not_deny_an_executed_action_or_trigger_a_retry(self):
+        state = {"saves": 0}
+        target = el(name="Save", automation_id="save")
+
+        class Saving:
+            def DoDefaultAction(self):
+                state["saves"] += 1
+                target.Name = "Saved"
+                return True
+
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "tree_size", return_value=1), \
+             mock.patch.object(act.win32, "grab", return_value=(b"cached", 10, 10)), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": True, "value": Saving(),
+                                             "canonical": "LegacyIAccessiblePattern",
+                                             "pattern_id": 10018}):
+            result = act.act(1, "click", target="save", allow_foreground=True)
+        self.assertEqual(state["saves"], 1)
+        self.assertEqual(target.Name, "Saved")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result.get("observation_source"), "PrintWindow")
+        self.assertEqual(result["observation"], "captured frames are identical")
+        self.assertEqual(result["route_effect"], "business effect unverified")
+        self.assertFalse(result["effect_verified"])
 
     def test_a_click_that_changed_the_control_has_no_observation(self):
         state = {"n": 0}
@@ -604,41 +720,133 @@ class TestFocusSettling(ActCase):
     not enough, so the wait is driven by the focus actually arriving.
     """
 
+    def setUp(self):
+        super().setUp()
+        self.now = 0.0
+
+        def advance(seconds):
+            self.now = round(self.now + seconds, 9)
+
+        for patch in (
+                mock.patch.object(act.time, "monotonic", side_effect=lambda: self.now),
+                mock.patch.object(act.time, "sleep", side_effect=advance),
+                mock.patch.object(act.win32.user32, "GetAncestor", return_value=1)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
     def test_no_keys_until_the_focus_is_reported(self):
         observed = []
-        with mock.patch.object(act.win32, "focus_window", side_effect=[0, 0, 1]), \
+        with mock.patch.object(act.win32, "focus_window",
+                               side_effect=lambda: 1 if self.now >= 0.04 else 0), \
              mock.patch.object(act, "SendKeys",
-                               side_effect=lambda text, **kw: observed.append(text)), \
-             mock.patch.object(act.time, "sleep"):
+                               side_effect=lambda text, **kw: observed.append(text)):
             settled = act._focus_settled(1, timeout_ms=500)
         self.assertTrue(settled)
         self.assertEqual(observed, [], "waiting must not type anything")
 
     def test_focus_that_never_arrives_is_a_refusal(self):
-        with mock.patch.object(act.win32, "focus_window", return_value=0), \
-             mock.patch.object(act.time, "sleep"), \
-             mock.patch.object(act.time, "monotonic", side_effect=[0, 0.1, 0.2, 9, 9]):
+        with mock.patch.object(act.win32, "focus_window", return_value=0):
+            self.assertFalse(act._focus_settled(1, timeout_ms=500))
+        self.assertLessEqual(self.now, 0.5)
+
+    def test_another_foreground_window_is_not_the_target(self):
+        with mock.patch.object(act.win32, "foreground", return_value=999), \
+             mock.patch.object(act.win32, "focus_window", return_value=999):
+            self.assertFalse(act._focus_settled(1, timeout_ms=500))
+        self.assertLessEqual(self.now, 0.5)
+
+    def test_focus_must_belong_to_the_addressed_window(self):
+        with mock.patch.object(act.win32, "focus_window", return_value=999), \
+             mock.patch.object(act.win32.user32, "GetAncestor", return_value=999):
             self.assertFalse(act._focus_settled(1, timeout_ms=500))
 
-    def test_typing_sends_a_leading_key_then_the_text(self):
+    def test_focus_lost_during_settling_is_refused(self):
+        with mock.patch.object(act.win32, "foreground",
+                               side_effect=lambda: 1 if self.now < 0.05 else 999):
+            self.assertFalse(act._focus_settled(1, timeout_ms=500))
+
+    def test_focus_read_exceeding_the_budget_cannot_report_settled(self):
+        def delayed_focus():
+            if self.now:
+                self.now += 1
+            return 1
+
+        with mock.patch.object(act.win32, "focus_window", side_effect=delayed_focus):
+            self.assertFalse(act._focus_settled(1, timeout_ms=500))
+
+    def test_typing_refuses_focus_left_on_another_control_in_the_same_window(self):
+        root = el(name="disabled-field", automation_id="e")
+        root.HasKeyboardFocus = False
         sent = []
-        root = el(name="f", automation_id="f", rect=FakeRect(0, 0, 100, 20))
         with self.patch_children([]), self.patch_read(detailed(root)), \
              self.patch_activate(True), \
+             mock.patch.object(act.win32, "focus_window", return_value=5), \
              mock.patch.object(act.tree, "pattern_detailed",
                                return_value={"ok": False, "reason": "pattern unavailable",
                                              "cause_unknown": True}), \
              mock.patch.object(act.win32, "window_at", return_value=1), \
-             mock.patch.object(act, "_focus_settled", return_value=True), \
-             mock.patch.object(act, "SetCursorPos"), \
-             mock.patch.object(act, "Click"), \
-             mock.patch.object(act, "SendKeys",
-                               side_effect=lambda text, **kw: sent.append(text)):
-            act.act(1, "type", target="f", text="hello", allow_foreground=True)
-        self.assertIn("{RIGHT}", sent, "a leading key must precede the text")
-        self.assertEqual(sent[-1], "hello")
-        # The text is sent once, after the leading key.
-        self.assertEqual(sent.count("hello"), 1)
+             mock.patch.object(act, "SetCursorPos"), mock.patch.object(act, "Click"), \
+             mock.patch.object(act, "SendKeys", side_effect=lambda text, **kw: sent.append(text)):
+            result = act.act(1, "type", target="e", text="private", allow_foreground=True)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "target not focused")
+        self.assertEqual(sent, [])
+        self.assertLessEqual(self.now, 0.8)
+
+    def test_keys_recheck_foreground_after_setfocus(self):
+        state = {"foreground": 1}
+        root = mock.Mock()
+        root.SetFocus.side_effect = lambda: state.update(foreground=999)
+        sent = []
+        with mock.patch.object(act.win32, "foreground", side_effect=lambda: state["foreground"]), \
+             mock.patch.object(act.launch, "is_shown", return_value=True), \
+             mock.patch.object(act, "ControlFromHandle", return_value=root), \
+             mock.patch.object(act, "SendKeys", side_effect=lambda text, **kw: sent.append(text)):
+            result = act.act(1, "key", text="Enter", allow_foreground=True)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "target not focused")
+        self.assertEqual(sent, [])
+        self.assertLessEqual(self.now, 0.8)
+
+    def test_typing_stops_if_focus_moves_after_select_all(self):
+        root = el(name="field", automation_id="e")
+        root.HasKeyboardFocus = True
+        state = {"foreground": 1}
+        sent = []
+
+        def send(text, **kwargs):
+            sent.append(text)
+            state["foreground"] = 999
+
+        with self.patch_children([]), self.patch_read(detailed(root)), \
+             self.patch_activate(True), \
+             mock.patch.object(act.win32, "foreground", side_effect=lambda: state["foreground"]), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               return_value={"ok": False, "reason": "pattern unavailable",
+                                             "cause_unknown": True}), \
+             mock.patch.object(act.win32, "window_at", return_value=1), \
+             mock.patch.object(act, "SetCursorPos"), mock.patch.object(act, "Click"), \
+             mock.patch.object(act, "SendKeys", side_effect=send):
+            result = act.act(1, "type", target="e", text="private", allow_foreground=True)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "target not focused")
+        self.assertEqual(sent, ["{Ctrl}a"])
+        self.assertFalse(result["retry_safe"])
+
+    def test_keys_wait_for_native_focus_to_arrive(self):
+        sent_at = []
+        root = mock.Mock()
+        root.SetFocus.return_value = True
+        with mock.patch.object(act.launch, "is_shown", return_value=True), \
+             mock.patch.object(act, "ControlFromHandle", return_value=root), \
+             mock.patch.object(act.win32, "focus_window",
+                               side_effect=lambda: 1 if self.now >= 0.06 else 0), \
+             mock.patch.object(act, "SendKeys", side_effect=lambda *args, **kw: sent_at.append(self.now)):
+            result = act.act(1, "key", text="Enter", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(sent_at), 1)
+        self.assertGreaterEqual(sent_at[0], 0.06)
+        self.assertLessEqual(self.now, 0.8)
 
     def test_a_failed_focus_wait_sends_nothing(self):
         root = el(name="f", automation_id="f", rect=FakeRect(0, 0, 100, 20))

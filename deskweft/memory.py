@@ -498,7 +498,7 @@ def _recall_many(root: Path, text: str, budget: list[int]) -> dict:
         chosen = [r for r in records if r["key"] == key]
         exact = bool(chosen)
         _fail_if_unreadable(root, key, chosen)
-        if not chosen:
+        if not chosen and version.casefold() != "unversioned":
             family = name.strip().casefold()
             chosen = [r for r in records if r["app"].strip().casefold() == family]
     else:

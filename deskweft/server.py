@@ -86,11 +86,12 @@ the control state, compare the scroll position. A worker timeout is
 execution_state="unknown" - the action may have run, so inspect the window
 before deciding anything; do not resend automatically.
 
-Chromium/Electron applications (QQ, VS Code, Slack, Discord, Teams) keep their
-accessibility tree off until it is asked for at launch. open_app(...,
-accessibility=true) passes the flags that turn it on and keep it alive while
-another window is in front. Empty PaneControls can be a clue to missing flags,
-occlusion, a wrong host or a provider failure; check the evidence. Re-running
+Some tested Chromium/Electron versions needed accessibility flags for a usable
+tree. open_app(..., accessibility=true) appends the documented Chromium flags;
+verify the running process and read the target page again. This does not
+guarantee a tree, background actions or complete data. Empty PaneControls can
+be a clue to missing flags, occlusion, a wrong host or a provider failure;
+check the evidence. Re-running
 open_app does not restart an existing single-
 instance app, so its flags may never apply - check the process instead of
 retrying.
@@ -124,13 +125,6 @@ mcp = FastMCP(name="deskweft", instructions=INSTRUCTIONS, lifespan=_lifespan,
               strict_input_validation=True)
 
 
-def _foreground() -> dict:
-    before = win32.foreground()
-    after = win32.foreground()
-    return {"foreground_before": before, "foreground_after": after,
-            "foreground_changed": before != after}
-
-
 def _worker_call(action: str, parameters: dict, timeout_ms: int) -> dict:
     """The single path from a tool to UIA. Adds the shared foreground sample."""
     before = win32.foreground()
@@ -146,17 +140,20 @@ def _worker_call(action: str, parameters: dict, timeout_ms: int) -> dict:
 @mcp.tool
 def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
              show: StrictBool = False, accessibility: StrictBool = False) -> dict:
-    """Start a program without letting it grab the screen.
+    """Start a program and attempt to hide its newly owned windows.
 
     Only windows proven to descend from the new process are hidden, and the
     foreground is handed back only when one of those took it. Windows that
     cannot be attributed appear under window_candidates and are left alone.
 
-    Set accessibility=True for Electron apps. Chromium keeps its tree off until
-    launch (measured on QQ: 9 unnamed shell nodes without the flag, 128 named
-    ones with it) and throws it away when another window comes forward; the
-    flags here stop that. Re-running this does not restart a single-instance
-    app, so the flags may not be adopted - check the process.
+    Hiding is attempted after launch, so a transient foreground change remains
+    possible. Check visibility_control, hidden_windows[].still_visible and
+    foreground samples; they do not prove it never appeared between samples.
+
+    accessibility=True appends Chromium accessibility/occlusion flags. Check
+    their actual adoption and the target page's tree for this app version;
+    they do not guarantee background actions or complete data. Re-running
+    this does not restart a single-instance app, so check its process.
     """
     # settle stays a float for signature compatibility, but a JSON string would
     # reach `time.time() + settle` and raise; reject it as an argument instead.
@@ -165,6 +162,7 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
         return {"ok": False, "reason": "invalid arguments",
                 "detail": "settle must be a number of seconds in 0..120",
                 "execution_state": "not_started", "retry_safe": True}
+    before = win32.foreground()
     result = _launch(
         command, args, settle=settle, hide_new_windows=not show,
         accessibility=accessibility,
@@ -174,7 +172,9 @@ def open_app(command: StrictStr, args: StrictStr = "", settle: float = 2.5,
             "Windows are hidden. Use see(hwnd) to inspect one, or reveal(hwnd) "
             "to show it - reveal moves the foreground and needs the user's authorization."
         )
-    result.update(_foreground())
+    result.setdefault("foreground_before", before)
+    result.setdefault("foreground_after", win32.foreground())
+    result["foreground_changed"] = result["foreground_before"] != result["foreground_after"]
     return result
 
 
@@ -194,7 +194,7 @@ def reveal(hwnd: StrictInt) -> dict:
         "title": win32.title(hwnd),
         "is_foreground": win32.foreground() == hwnd,
         "visible": bool(win32.user32.IsWindowVisible(hwnd)),
-        "note": "" if ok else "the window did not become visible and foreground; nothing changed on screen",
+        "note": "" if ok else "the window was not confirmed both shown and foreground; inspect visible and is_foreground before retrying",
     }
 
 
@@ -353,8 +353,12 @@ def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: Target,
 
     method is a public member path: "Value", "GetSelection",
     "DocumentRange.GetText". The last part is called when it is a method and
-    read when it is a property. args holds bool/int/finite float/str only;
-    null inside the list is refused. args=null means no arguments.
+    read when it is a property. args holds bool/int/finite float/str, or a
+    {"$control": {"hwnd": ..., "automation_id": ...}} description resolved
+    uniquely in this same window's current complete tree. These descriptions
+    retain no COM identity; optional rect checks movement after a unique match.
+    Cross-window controls, raw metadata and null list items are refused.
+    args=null means no arguments.
 
     Members on the read-only table run in the background; every other member
     needs allow_foreground=true first. That table is explicit - a Get prefix is
@@ -411,8 +415,9 @@ def recall(query: StrictStr, max_body_chars: StrictInt = 6000,
     """Look up what earlier work recorded, by app, version or exact key.
 
     An empty query returns only the stored keys. "name@version" is an exact key;
-    a miss falls back to that app's other versions with exact=false. A Windows
-    path or "app.exe" is reduced to the executable name first.
+    a known-version miss falls back to that app's other versions with
+    exact=false. A missing app@unversioned observation returns no matches.
+    A Windows path or "app.exe" is reduced to the executable name first.
 
     Each plan carries uses_foreground, reviewed, proven, rank and its body. The
     whole response has one body budget; a plan marked truncated has
@@ -421,10 +426,10 @@ def recall(query: StrictStr, max_body_chars: StrictInt = 6000,
     revision change means the plan changed and the pieces no longer belong
     together.
 
-    Inherited plans (inherits != null) and family matches are candidates to
-    explore, not this version's verified results: their rank is 0 on purpose.
-    reviewed/proven describe the plan as a whole, never permission for the
-    action you are about to take.
+    Inherited plans (inherits != null) have rank 0. Family matches retain the
+    returned version's own rank; they are candidates to explore, not the
+    requested version's verified results. reviewed/proven describe the stored
+    plan, never permission for the action you are about to take.
     """
     return memory.recall(query, max_body_chars, plan_id, body_offset)
 
@@ -511,12 +516,16 @@ def forget(app: StrictStr, version: StrictStr | None, plan_id: StrictStr = "",
 @mcp.tool
 def private_desktop(action: StrictStr, name: StrictStr = "",
                     allow_foreground: StrictBool = False) -> dict:
-    """Keep an automation target on its own desktop, and show it on request.
+    """Create or inspect a private desktop, or switch to it on request.
 
     A private desktop is a separate screen: a program started on it does not
     appear in front of you, and it keeps running while you use your own desktop.
     `show` brings that desktop to your screen so you can look at it and take
     over yourself; `hide` sends it back to where you were.
+
+    These actions do not start or move an application or the UIA worker onto
+    that desktop. Creating one does not isolate an existing target, and show
+    switches the user's screen rather than providing a background preview.
 
     Actions: `status` (read only), `create` (does not switch), `show`, `hide`,
     `close`. Showing or hiding changes what you are looking at, so both need
@@ -557,7 +566,9 @@ def private_desktop(action: StrictStr, name: StrictStr = "",
                             "show, hide or close",
                   "execution_state": "not_started", "retry_safe": True}
     result.setdefault("visible_desktop", _desktop_session.visible_desktop())
-    result.update(_foreground())
+    result["foreground_before"] = before
+    result["foreground_after"] = win32.foreground()
+    result["foreground_changed"] = before != result["foreground_after"]
     return result
 
 

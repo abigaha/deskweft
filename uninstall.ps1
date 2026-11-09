@@ -9,15 +9,46 @@ $ErrorActionPreference = "Continue"
 
 Unregister-ScheduledTask -TaskName "deskweft-helper" -Confirm:$false -ErrorAction SilentlyContinue
 
+$python = Join-Path ([IO.Path]::GetFullPath($Root)) ".venv\Scripts\python"
+$expectedCommand = '^\s*(?:"' + [regex]::Escape($python) + 'w?\.exe"|' +
+    [regex]::Escape($python) + 'w?\.exe)\s+-m\s+deskweft\.server(?:\s|$)'
 Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-    Where-Object { $_.CommandLine -like '*deskweft.server*' } |
+    Where-Object { $_.CommandLine -match $expectedCommand } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 if (-not $KeepClientConfig) {
     $codex = "$env:USERPROFILE\.codex\config.toml"
     if (Test-Path $codex) {
         $text = Get-Content $codex -Raw
-        $text = [regex]::Replace($text, '(?ms)(?:^|\r?\n)\[mcp_servers\.deskweft\].*?(?=\r?\n\[|$)', '')
+        # Strings, comments and arrays can contain lines that look like table headers.
+        $tokens = @'
+(?msx)
+    """ (?: \\ . | (?! """) . )* "{3,5}
+  | ''' .*? '{3,5}
+  | " (?: \\ . | [^"\\\r\n] )* "
+  | ' [^'\r\n]* '
+  | \# [^\r\n]*
+  | (?<header> ^ [\t ]* \[ [^\r\n]* \] [\t ]* (?: \# [^\r\n]* )? \r? $ )
+  | (?<open> [\[{] )
+  | (?<close> [\]}] )
+'@
+        $depth = 0
+        $headers = @([regex]::Matches($text, $tokens) | ForEach-Object {
+            if ($_.Groups['header'].Success -and $depth -eq 0) { $_ }
+            elseif ($_.Groups['open'].Success) { $depth++ }
+            elseif ($_.Groups['close'].Success) { $depth-- }
+        })
+        $deskweftTable = @'
+(?x) ^ [\t ]* \[ \[? [\t ]*
+(?: mcp_servers | "mcp_servers" | 'mcp_servers' ) [\t ]* \. [\t ]*
+(?: deskweft | "deskweft" | 'deskweft' ) [\t ]* (?: \. | \] )
+'@
+        for ($i = $headers.Count - 1; $i -ge 0; $i--) {
+            if ($headers[$i].Value -cmatch $deskweftTable) {
+                $end = if ($i + 1 -lt $headers.Count) { $headers[$i + 1].Index } else { $text.Length }
+                $text = $text.Remove($headers[$i].Index, $end - $headers[$i].Index)
+            }
+        }
         Set-Content -Path $codex -Value $text.TrimEnd() -Encoding UTF8
     }
 

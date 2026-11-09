@@ -57,7 +57,7 @@ class FakeUser32:
     def SwitchDesktop(self, handle):
         name = self._names.get(handle)
         self.calls.append(("switch", name))
-        if not self.switch_ok:
+        if not self.switch_ok or name is None:
             return 0
         # A real switch changes where input goes; model that.
         self.visible = name
@@ -65,6 +65,7 @@ class FakeUser32:
 
     def CloseDesktop(self, handle):
         self.calls.append(("close", self._names.get(handle)))
+        self._names.pop(handle, None)
         return 1
 
     def GetUserObjectInformationW(self, handle, index, buffer, length, needed):
@@ -171,6 +172,48 @@ class SessionCase(unittest.TestCase):
         self.assertEqual(closed["visible_desktop"], "Default")
         self.assertIsNone(self.session.status()["private_desktop"])
         self.assertIn(("close", "probe"), self.user32.calls)
+
+    def test_a_failed_close_keeps_the_desktop_and_return_path_for_retry(self):
+        self.user32.visible = "Workspace"
+        self.session.create("probe")
+        self.session.show()
+        self.user32.switch_ok = False
+        failed = self.session.close()
+        self.assertFalse(failed["ok"])
+        self.assertFalse(failed["closed"])
+        self.assertEqual(self.session.status()["private_desktop"], "probe")
+        self.assertEqual(self.session.status()["previous_desktop"], "Workspace")
+        self.user32.switch_ok = True
+        closed = self.session.close()
+        self.assertTrue(closed["ok"], closed)
+        self.assertTrue(closed["closed"])
+        self.assertEqual(self.session.status()["visible_desktop"], "Workspace")
+        self.assertIsNone(self.session.status()["private_desktop"])
+
+    def test_close_requires_the_previous_desktop_to_be_observed_before_forgetting(self):
+        for after in (None, "Other"):
+            with self.subTest(after=after):
+                user32 = FakeUser32(visible="Workspace")
+                session = pd.DesktopSession(user32=user32)
+                session.create("probe")
+                session.show()
+                switch = user32.SwitchDesktop
+
+                def unconfirmed_switch(handle):
+                    user32.visible = after
+                    return 1
+
+                user32.SwitchDesktop = unconfirmed_switch
+                failed = session.close()
+                self.assertFalse(failed["ok"], failed)
+                self.assertFalse(failed["closed"])
+                self.assertEqual(session.status()["private_desktop"], "probe")
+                self.assertEqual(session.status()["previous_desktop"], "Workspace")
+                user32.SwitchDesktop = switch
+                user32.visible = "probe"
+                closed = session.close()
+                self.assertTrue(closed["ok"], closed)
+                self.assertEqual(closed["visible_desktop"], "Workspace")
 
     def test_an_unreadable_visible_desktop_still_attempts_to_go_back(self):
         """Measured: an unreadable desktop name made hide() believe it was

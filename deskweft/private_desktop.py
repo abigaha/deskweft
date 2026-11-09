@@ -177,7 +177,7 @@ class DesktopSession:
         finally:
             self._user32.CloseDesktop(handle)
         after = self.visible_desktop()
-        if not switched or after == self._name:
+        if not switched or after != target:
             return {"ok": False, "reason": "desktop switch refused",
                     "detail": f"could not return to {target!r}; "
                               f"the screen is on {after!r}",
@@ -193,6 +193,9 @@ class DesktopSession:
             # One attempt: retrying a refused switch here could spin, and the
             # honest report is where the screen ended up.
             back = self._hide_locked()
+            if not back.get("ok"):
+                return {"ok": False, "closed": False, "name": self._name,
+                        "visible_desktop": self.visible_desktop(), "hiding": back}
             name, handle = self._name, self._handle
             self._name = None
             self._handle = 0
