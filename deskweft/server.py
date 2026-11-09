@@ -9,6 +9,7 @@ and does no window I/O of its own beyond cheap metadata.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated, TypedDict
 
@@ -18,9 +19,14 @@ from mcp.types import TextContent
 from pydantic import ConfigDict, Field, StrictBool, StrictInt, StrictStr, with_config
 
 from . import appinfo, launch as _launch_module, memory, uia_worker, win32
+from .private_desktop import DesktopSession
 
 # Bound at import time so tests can replace one name instead of the module.
 _launch = _launch_module.launch
+
+# One desktop per service process: it owns the handle and the record of what the
+# screen was on before the first switch.
+_desktop_session = DesktopSession()
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -494,6 +500,59 @@ def forget(app: StrictStr, version: StrictStr | None, plan_id: StrictStr = "",
     other versions or other applications.
     """
     return memory.forget(app, version, plan_id, expected_revision, confirm)
+
+
+@mcp.tool
+def private_desktop(action: StrictStr, name: StrictStr = "",
+                    allow_foreground: StrictBool = False) -> dict:
+    """Keep an automation target on its own desktop, and show it on request.
+
+    A private desktop is a separate screen: a program started on it does not
+    appear in front of you, and it keeps running while you use your own desktop.
+    `show` brings that desktop to your screen so you can look at it and take
+    over yourself; `hide` sends it back to where you were.
+
+    Actions: `status` (read only), `create` (does not switch), `show`, `hide`,
+    `close`. Showing or hiding changes what you are looking at, so both need
+    allow_foreground=true. The result always reports `visible_desktop` as the
+    desktop that actually receives input, never what this call hoped for - a
+    refused switch says so and names where the screen really is.
+
+    Switching desktops is not a sandbox: a program on another desktop still runs
+    with your rights, and anything it writes is still written.
+    """
+    before = win32.foreground()
+    if action == "status":
+        result = _desktop_session.status()
+    elif action == "create":
+        created = _desktop_session.create(name or f"DeskWeft_{int(time.time())}")
+        if created.get("ok"):
+            created.update(_desktop_session.status())
+        result = created
+    elif action in ("show", "hide", "close"):
+        if not allow_foreground:
+            result = {
+                "ok": False, "needs_permission": True,
+                "reason": f"{action} changes what is on your screen",
+                "detail": "Switching desktops hides whatever you are looking at. "
+                          "Ask the user first, then retry with allow_foreground=true.",
+                "execution_state": "not_started", "effect_verified": False,
+                "retry_safe": True,
+            }
+        else:
+            result = getattr(_desktop_session, action)()
+            if isinstance(result, dict) and result.get("ok"):
+                # The switch happened; whether the user's work survived is not
+                # something this call can verify.
+                result["effect_verified"] = False
+    else:
+        result = {"ok": False, "reason": "invalid arguments",
+                  "detail": f"unknown action {action!r}; use status, create, "
+                            "show, hide or close",
+                  "execution_state": "not_started", "retry_safe": True}
+    result.setdefault("visible_desktop", _desktop_session.visible_desktop())
+    result.update(_foreground())
+    return result
 
 
 def main() -> None:

@@ -116,6 +116,16 @@ Sixteen tools cover windows, generic queries, item-container enumeration and mem
   record only with `confirm=true`. Inherited `see` records are pointers and are
   refused here
 
+**A desktop you can look at**
+
+- `private_desktop(action, name="", allow_foreground=false)` — creates a separate
+  desktop for automation and, on request, brings it to your screen. `status` is
+  read-only; `create` does not switch anything; `show`, `hide` and `close` change
+  what you are looking at and need `allow_foreground=true`. Every result reports
+  `visible_desktop` as the desktop that really receives input — a refused switch
+  names where the screen actually is instead of claiming success. This is not a
+  sandbox: a program on another desktop still runs with your rights.
+
 ### Exact target selectors
 
 `click`, `type_text`, `scroll`, `invoke_pattern` and `find_items` accept a selector object:
