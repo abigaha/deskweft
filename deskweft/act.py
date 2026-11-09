@@ -397,6 +397,25 @@ def _state_signature(el) -> tuple | None:
         return (name, None)
 
 
+def screen_changed(hwnd: int, before: bytes | None) -> bool | None:
+    """Did the window actually redraw? None when it cannot be compared.
+
+    Measured on QQ 9.9.37: LegacyIAccessible.DoDefaultAction returns True with
+    QQ in the foreground and changes exactly zero pixels, while a real cursor
+    click on the same rectangle changes ~56k. Element counts did not catch that
+    (316 -> 166 while nothing on screen moved), so the capture is the evidence.
+    """
+    if before is None:
+        return None
+    try:
+        got = win32.grab(hwnd)
+    except Exception:
+        return None
+    if got is None:
+        return None
+    return got[0] != before
+
+
 def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, start: float) -> dict:
     """Legacy first (measured not to take the foreground), then the other routes.
 
@@ -423,6 +442,12 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
             continue
         before = _state_signature(el)
         size_before = tree_size(hwnd)
+        pixels_before = None
+        try:
+            grabbed = win32.grab(hwnd)
+            pixels_before = grabbed[0] if grabbed else None
+        except Exception:
+            pixels_before = None
         try:
             returned = member()
         except Exception as error:
@@ -436,16 +461,22 @@ def _click_uia(hwnd: int, hit: dict, el, target: str | dict, fg_before: int, sta
         done = _done(hwnd, "click", target, label, fg_before, start)
         after = _state_signature(el)
         size_after = tree_size(hwnd)
-        # Measured on WeChat: both semantic routes returned True while nothing
-        # moved. Success is reported, but never as an effect. The view can change
-        # without the clicked control changing, so both are compared - and an
-        # unreadable side proves nothing either way.
-        unchanged_control = (before is not None and after is not None
-                             and before == after)
-        unchanged_tree = (size_before is not None and size_after is not None
-                          and size_before == size_after)
-        if unchanged_control and unchanged_tree:
+        redrew = screen_changed(hwnd, pixels_before)
+        # Measured on QQ 9.9.37: this route returns True without drawing
+        # anything, even with the window in front. A capture that did not change
+        # is the strongest evidence available here, and it beats element counts,
+        # which moved (316 -> 166) while the screen did not.
+        if redrew is False:
             done["observation"] = "no visible change detected"
+            done["route_effect"] = "not observed: the window did not redraw"
+        elif redrew is True:
+            done["route_effect"] = "window redrew"
+        elif (before is not None and after is not None and before == after
+              and size_before is not None and size_after is not None
+              and size_before == size_after):
+            # No capture available: fall back to the weaker signals, and say so.
+            done["observation"] = "no visible change detected"
+            done["route_effect"] = "unknown: compared element state only"
         return done
 
     box = hit.get("rect")

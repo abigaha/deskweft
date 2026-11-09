@@ -449,6 +449,50 @@ class TestClickObservation(ActCase):
         self.assertFalse(result["effect_verified"])
         self.assertEqual(result.get("observation"), "no visible change detected")
 
+    def test_a_click_that_did_not_redraw_the_window_says_so(self):
+        """Measured on QQ 9.9.37: DoDefaultAction returns True with the window in
+        front and changes zero pixels. Element counts missed it, so the capture is
+        the evidence."""
+        target = el(name="联系人", automation_id="")
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act, "tree_size", side_effect=[316, 166]), \
+             mock.patch.object(act.win32, "grab", return_value=(b"same", 10, 10)), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda e, name: (
+                                   {"ok": True, "value": mock.Mock(
+                                       DoDefaultAction=mock.Mock(return_value=True)),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="联系人", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["observation"], "no visible change detected")
+        self.assertIn("did not redraw", result["route_effect"])
+
+    def test_a_click_that_redrew_the_window_is_reported_as_such(self):
+        target = el(name="联系人", automation_id="")
+        grabs = iter([(b"before", 10, 10), (b"after", 10, 10)])
+        with self.patch_children([]), self.patch_read(detailed(target)), \
+             mock.patch.object(act, "ControlFromHandle", return_value=target), \
+             mock.patch.object(act, "tree_size", return_value=316), \
+             mock.patch.object(act.win32, "grab", side_effect=lambda h: next(grabs)), \
+             mock.patch.object(act.tree, "pattern_detailed",
+                               side_effect=lambda e, name: (
+                                   {"ok": True, "value": mock.Mock(
+                                       DoDefaultAction=mock.Mock(return_value=True)),
+                                    "canonical": "LegacyIAccessiblePattern",
+                                    "pattern_id": 10018}
+                                   if name == "LegacyIAccessiblePattern"
+                                   else {"ok": False, "reason": "pattern unavailable",
+                                         "cause_unknown": True})):
+            result = act.act(1, "click", target="联系人", allow_foreground=True)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("observation", result)
+        self.assertEqual(result["route_effect"], "window redrew")
+
     def test_a_click_that_changed_the_control_has_no_observation(self):
         state = {"n": 0}
         target = el(name="展开", automation_id="")
