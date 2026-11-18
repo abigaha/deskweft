@@ -749,17 +749,7 @@ def _is_control_argument(value) -> bool:
     hwnd = spec.get("hwnd")
     if isinstance(hwnd, bool) or not isinstance(hwnd, int) or hwnd <= 0:
         return False
-    identity = [key for key in ("name", "automation_id", "control_type")
-                if isinstance(spec.get(key), str) and spec[key]]
-    if not identity:
-        return False
-    if "rect" in spec:
-        rect = spec["rect"]
-        if not isinstance(rect, list) or len(rect) != 4:
-            return False
-        if any(isinstance(v, bool) or not isinstance(v, int) for v in rect):
-            return False
-    return True
+    return tree.target_error({key: field for key, field in spec.items() if key != "hwnd"}) is None
 
 
 def _control_signature(el) -> tuple | None:
@@ -794,28 +784,12 @@ def _resolve_arguments(hwnd: int, args) -> dict:
         if spec.get("hwnd") != hwnd:
             return {"ok": False, "reason": "invalid arguments",
                     "detail": "a control argument must name the window it is resolved in"}
+        selector = {key: field for key, field in spec.items() if key not in ("hwnd", "rect")}
         detailed = tree.read_detailed(hwnd, timeout_ms=3000, max_elements=600)
-        if detailed["timed_out"] or detailed["limit_reached"] \
-                or not detailed["identity_complete"]:
-            return {"ok": False, "reason": "tree incomplete",
-                    "detail": "the referenced control cannot be re-resolved reliably"}
-
-        def matches(row: dict) -> bool:
-            for key, field in (("name", "name"), ("automation_id", "automation_id"),
-                               ("control_type", "control_type")):
-                wanted = spec.get(key)
-                if wanted and row.get(field) != wanted:
-                    return False
-            return True
-
-        candidates = [row for row in detailed["elements"] if matches(row)]
-        if len(candidates) > 1:
-            return {"ok": False, "reason": "ambiguous target",
-                    "detail": f"{len(candidates)} controls still match the reference"}
-        if not candidates:
-            return {"ok": False, "reason": "no such control",
-                    "detail": "the referenced control is no longer in this window"}
-        row = candidates[0]
+        found = tree.resolve(detailed, selector, exact_only=True)
+        if not found["ok"]:
+            return found
+        row = found["element"]
         if "rect" in spec and row.get("rect") != spec["rect"]:
             return {"ok": False, "reason": "no such control",
                     "detail": f"the control moved: {row.get('rect')} != {spec['rect']}"}

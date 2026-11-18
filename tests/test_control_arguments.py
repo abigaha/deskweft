@@ -13,6 +13,7 @@ matches, the call is refused instead of acting on whatever now occupies the spot
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from deskweft import act, tree
@@ -75,6 +76,17 @@ class TestControlArguments(unittest.TestCase):
 
 
 class TestControlResolution(unittest.TestCase):
+    def invoke_reference(self, spec, member, *rows):
+        root = el(patterns={"TextPattern": SimpleNamespace(RangeFromChild=member)},
+                  children=list(rows))
+        with mock.patch.object(tree, "ControlFromHandle", return_value=root), \
+             mock.patch.object(act, "ControlFromHandle", return_value=root), \
+             mock.patch.object(act.win32, "foreground", return_value=7), \
+             mock.patch.object(act.win32, "title", return_value="Test"):
+            return act.invoke_pattern(42, "TextPattern", "", "RangeFromChild",
+                                      [{"$control": {"hwnd": 42, **spec}}],
+                                      allow_foreground=True)
+
     def resolve(self, args, rows, revision=(1, 2, 3, 4)):
         element = el(name="node", automation_id="n1")
         with mock.patch.object(act, "ControlFromHandle", return_value=el(name="root")), \
@@ -117,6 +129,52 @@ class TestControlResolution(unittest.TestCase):
         self.assertFalse(resolved["ok"])
         self.assertEqual(resolved["reason"], "invalid arguments")
 
+    def test_unreadable_reference_field_refuses_before_the_member_call(self):
+        member = mock.Mock(return_value=True)
+        result = self.invoke_reference(
+            {"name": "node", "control_type": "TreeItemControl"}, member,
+            el(name="node", control_type="TreeItemControl"),
+            el(name="node", control_type="TreeItemControl", fail={"ControlTypeName"}),
+        )
+        self.assertEqual(result.get("reason"), "tree incomplete", result)
+        member.assert_not_called()
+
+    def test_invalid_reference_fields_are_rejected_before_the_member_call(self):
+        for spec in ({"name": "node", "automation_id": False},
+                     {"automation_id": "n1", "name": None},
+                     {"name": "node", "control_type": 0},
+                     {"name": " ", "automation_id": ""},
+                     {"name": "node", "rect": [0, 0, 0, 10]},
+                     {"name": "node", "rect": [0, 0, 10, -1]},
+                     {"name": "node", "rect": [False, 0, 10, 10]}):
+            with self.subTest(spec=spec):
+                member = mock.Mock(return_value=True)
+                result = self.invoke_reference(spec, member, el(name="node", automation_id="n1"))
+                self.assertEqual(result.get("reason"), "invalid arguments", result)
+                member.assert_not_called()
+
+    def test_explicit_empty_id_does_not_match_a_nonempty_id(self):
+        member = mock.Mock(return_value=True)
+        result = self.invoke_reference({"name": "node", "automation_id": ""}, member,
+                                       el(name="node", automation_id="n1"))
+        self.assertEqual(result.get("reason"), "no such control", result)
+        member.assert_not_called()
+
+    def test_empty_id_and_valid_rectangle_match_the_intended_control(self):
+        member = mock.Mock(return_value=True)
+        row = el(name="node", rect=FakeRect(-10, -5, 0, 5))
+        result = self.invoke_reference({"name": "node", "automation_id": "",
+                                        "rect": [-10, -5, 10, 10]}, member,
+                                       row, el(name="node", automation_id="n1"))
+        self.assertTrue(result["ok"], result)
+        member.assert_called_once_with(row)
+
+    def test_rectangle_does_not_disambiguate_a_reference(self):
+        rows = [el(name="node"), el(name="node", rect=FakeRect(10, 10, 20, 20))]
+        result = self.resolve([{"$control": {"hwnd": 42, "name": "node",
+                                              "rect": [0, 0, 10, 10]}}], rows)
+        self.assertEqual(result["reason"], "ambiguous target")
+
     def test_the_arguments_stay_finite_when_no_reference_is_used(self):
         resolved = self.resolve([1, "a"], [])
         self.assertTrue(resolved["ok"], resolved)
@@ -147,6 +205,8 @@ class TestMemberKind(unittest.TestCase):
 
     def invoke(self, value, method, args):
         with mock.patch.object(act, "ControlFromHandle", return_value=el(name="root")), \
+             mock.patch.object(act.win32, "foreground", return_value=7), \
+             mock.patch.object(act.win32, "title", return_value="Test"), \
              mock.patch.object(act.tree, "pattern_detailed",
                                return_value={"ok": True, "value": value,
                                              "canonical": type(value).__name__,

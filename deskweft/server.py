@@ -1,4 +1,4 @@
-"""MCP server: address one window, never take the foreground.
+"""MCP server: address one window and report execution and foreground evidence.
 
 Every desktop call goes through uia_worker.call: UIA objects belong to the
 thread that made them, and a wedged provider call can only be stopped by
@@ -43,23 +43,25 @@ class Selector(TypedDict, total=False):
 Target = StrictStr | Selector
 
 INSTRUCTIONS = """\
-Window-addressed desktop control for Windows. Never takes the foreground unless
-the user has agreed; anything that might is refused with needs_permission
-before it acts.
+Use the least intrusive source that covers the request. An authorized export,
+file, CLI or API may answer it without a window. For a desktop task, windows()
+lists visible windows; app_info(hwnd) reports executable and version evidence.
+recall("name@version", max_body_chars=0) lists route summaries. Read the
+selected plan with its returned key and id; its trust rank is not permission.
 
-Start with windows() to get an hwnd, then app_info(hwnd) for the executable and
-the evidence behind its version. recall("name@version") reads what earlier work
-recorded for that version; recall("name") lists the versions that exist. A
-reviewed/proven rank is a hint about where to look, never permission to act.
-
-Reading is free, acting is not:
+needs_permission is a tool gate, not foreground protection. A UIA provider can
+activate its window even on a read. Check protection for the actual target and
+method, or obtain authorization for a foreground route before calling it.
+  - see(hwnd, native_only=true) lists native children without capturing an
+    image or walking UIA. Check native_children_truncated before drawing
+    conclusions about a missing or unique control.
   - see(hwnd, with_tree=true) returns elements, native_children, timed_out,
     limit_reached and identity_complete. An empty tree can mean a timeout, a
     filter, a wrong window or a missing accessibility flag; it is not proof the
     application has no accessibility.
-  - click/type_text/key/scroll act through a native control message when one
-    matches uniquely. Otherwise they need allow_foreground=true, which the user
-    must agree to first. A missing, ambiguous or incompletely read target is
+  - click/type_text try a native control message when one matches uniquely.
+    Other routes need allow_foreground=true, as do key and scroll. A missing,
+    ambiguous or incompletely read target is
     refused - the tool never clicks the window centre or picks the first
     lookalike.
     target also accepts a selector object: name, automation_id, control_type,
@@ -68,9 +70,8 @@ Reading is free, acting is not:
     rect is an additional filter, never a standalone coordinate click. A
     structured native target must first resolve uniquely in the complete tree.
   - invoke_pattern(hwnd, pattern, target, method, args) reaches members the
-    fixed tools do not cover. Members on the read-only table work in the
-    background; anything else needs allow_foreground=true. A Get prefix is not
-    proof of safety.
+    fixed tools do not cover. Only listed read-only members can pass the gate
+    without allow_foreground. A Get prefix is not proof of safety.
   - find_items(hwnd, target, ...) traverses ItemContainer inside one worker
     call, including virtualized items. Use property_id=0/value=null for all.
     Inspect reached_end, read_errors and truncation; pages rescan a live query,
@@ -202,8 +203,8 @@ def reveal(hwnd: StrictInt) -> dict:
 def windows() -> list[dict]:
     """List visible top-level windows: hwnd, title, class, pid, rect, foreground.
 
-    Cheap - window metadata only, no UI tree and no screenshot. Start here to
-    find the hwnd every other tool needs. Hidden windows are not listed; a
+    Window metadata only, no UI tree and no screenshot. Use this when a
+    desktop route needs an HWND. Hidden windows are not listed; a
     window returned by open_app comes with its own hwnd.
     """
     return win32.list_windows()
@@ -211,13 +212,14 @@ def windows() -> list[dict]:
 
 @mcp.tool
 def see(hwnd: StrictInt, with_tree: StrictBool = False, timeout_ms: StrictInt = 1500,
-        max_elements: StrictInt = 200):
-    """Look at one window without disturbing the user.
+        max_elements: StrictInt = 200, native_only: StrictBool = False):
+    """Inspect one window using only the observation route needed.
 
-    Captures the window with PrintWindow whether or not it is in front, without
-    moving the cursor or changing the foreground. with_tree=True adds the
-    accessibility tree, the native child control handles, and the diagnostics
-    that say whether the read was complete.
+    By default, capture a PrintWindow frame. with_tree=True also queries UIA
+    and lists native children; a provider may take focus even on a read.
+    Alternatively, native_only=True lists just native children in the worker:
+    no screenshot or UIA tree. Do not combine it with with_tree=True. Check
+    native_children_truncated before using the list to rule out duplicates.
 
     An empty elements list is not proof the application has no accessibility:
     check timed_out, limit_reached, identity_complete and tree_diagnostics.
@@ -225,7 +227,7 @@ def see(hwnd: StrictInt, with_tree: StrictBool = False, timeout_ms: StrictInt = 
     """
     result = _worker_call("see", {"hwnd": hwnd, "with_tree": with_tree,
                                   "timeout_ms": timeout_ms,
-                                  "max_elements": max_elements},
+                                  "max_elements": max_elements, "native_only": native_only},
                           max(3000, timeout_ms + 1000))
     if not isinstance(result, dict) or not result.get("ok"):
         return [TextContent(type="text", text=json.dumps(
@@ -333,9 +335,12 @@ def find_items(hwnd: StrictInt, target: Target = "", property_id: StrictInt = 0,
     Each page rescans a live list, not a snapshot; compare overlapping pages
     and known counts before claiming full coverage. Duplicate names survive.
     complete requires start_index=0, explicit provider end and lossless metadata.
-    reached_end alone only proves the queried suffix ended. Inspect read_errors,
-    result_truncated, has_more and next_start_index. COM references never leave
-    the worker. No Realize, selection, scrolling or focus operation is called.
+    reached_end alone only proves the queried suffix ended. If a later row is
+    clipped, the cursor revisits that row with a fresh budget. A clipped first
+    row stays partial; only follow an advancing cursor. has_more=true without
+    a cursor means the next offset exceeds the supported range. Inspect
+    read_errors and result_truncated. COM references stay in the worker; this
+    tool requests no Realize, selection, scrolling or focus operation.
     The parent deadline can discard a stuck worker; timeout state is unknown.
     """
     return _worker_call("find_items", {"hwnd": hwnd, "target": target,
@@ -360,10 +365,9 @@ def invoke_pattern(hwnd: StrictInt, pattern: StrictStr, target: Target,
     Cross-window controls, raw metadata and null list items are refused.
     args=null means no arguments.
 
-    Members on the read-only table run in the background; every other member
-    needs allow_foreground=true first. That table is explicit - a Get prefix is
-    not treated as proof of safety, and an application whose getter steals focus
-    belongs in memory with uses_foreground=true.
+    Members on the read-only table may be called without allow_foreground;
+    other members require it. A getter can still take focus: check protection
+    for this provider or obtain authorization for foreground use.
 
     target="" means the window's root element. Any other target must resolve to
     exactly one control by exact AutomationId/name or all selector fields, from a complete
@@ -419,12 +423,12 @@ def recall(query: StrictStr, max_body_chars: StrictInt = 6000,
     exact=false. A missing app@unversioned observation returns no matches.
     A Windows path or "app.exe" is reduced to the executable name first.
 
-    Each plan carries uses_foreground, reviewed, proven, rank and its body. The
-    whole response has one body budget; a plan marked truncated has
-    next_body_offset, and you continue with recall(key, plan_id=..., body_offset=
-    next). Only use steps once every piece was read with the same revision - a
-    revision change means the plan changed and the pieces no longer belong
-    together.
+    To choose a route without reading every body, use max_body_chars=0 with no
+    plan_id. Compare summaries, cost and uses_foreground; then read only the
+    selected plan using the returned key and plan_id with a positive budget.
+    The body budget is shared across results. Continue at next_body_offset
+    until it is null, even if the final suffix is marked truncated. Keep the
+    same key for inherited plans and restart if the revision changes.
 
     Inherited plans (inherits != null) have rank 0. Family matches retain the
     returned version's own rank; they are candidates to explore, not the
@@ -437,7 +441,8 @@ def recall(query: StrictStr, max_body_chars: StrictInt = 6000,
 @mcp.tool
 def remember(app: StrictStr, version: StrictStr | None, plan_id: StrictStr,
              summary: StrictStr, cost: StrictStr, body: StrictStr,
-             uses_foreground: StrictBool, overwrite: StrictBool = False) -> dict:
+             uses_foreground: StrictBool, overwrite: StrictBool = False,
+             expected_revision: StrictStr | None = None) -> dict:
     """Store one plan for one app@version. Returns its revision.
 
     version=None records an observation whose actual version is unknown; it is
@@ -445,14 +450,18 @@ def remember(app: StrictStr, version: StrictStr | None, plan_id: StrictStr,
     never upgraded in place - when the version is known, write a normal version
     record instead.
 
+    In summary, name the task and condition, any known failed route and what
+    would justify retrying or trying a different route. Do not invent evidence.
     Write the body with the documented sections so the knowledge survives:
     目标, 环境与适用条件, 已验证步骤, 已尝试但失败, 实测记录, 未解决, 未试方向,
     更新记录. Missing facts say "尚未记录" - not guessed, and never deleted.
     Keep failure paths and untried directions; the `## 未解决` section is what
     recall turns into unresolved gaps.
 
-    Overwriting an existing plan id needs overwrite=true, and changed content
-    resets that plan's reviewed and proven. Unknown side effects mean
+    For an update, pass overwrite=true and the revision you actually read as
+    expected_revision. A stale plan is not written; re-read and reconcile the
+    new evidence. Omitting the revision keeps the old unguarded overwrite.
+    Changed content resets reviewed and proven. Unknown side effects mean
     uses_foreground=true. This is text storage only: nothing in a body ever
     executes.
 
@@ -463,7 +472,7 @@ def remember(app: StrictStr, version: StrictStr | None, plan_id: StrictStr,
     which are exactly the parts the next session needs.
     """
     return memory.remember(app, version, plan_id, summary, cost, body,
-                           uses_foreground, overwrite)
+                           uses_foreground, overwrite, expected_revision)
 
 
 @mcp.tool

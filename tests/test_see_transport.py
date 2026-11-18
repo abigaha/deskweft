@@ -13,6 +13,23 @@ from deskweft import server
 
 
 class TestSeeTransport(unittest.IsolatedAsyncioTestCase):
+    async def test_native_only_is_advertised_and_forwarded_as_a_text_only_read(self):
+        meta = {"ok": True, "hwnd": 5, "native_only": True,
+                "native_children": [], "native_children_truncated": False}
+        with mock.patch.object(server, "_worker_call", return_value={
+                "ok": True, "meta": meta, "png": None}) as dispatch, \
+             mock.patch.object(server.uia_worker, "close"):
+            async with Client(server.mcp) as client:
+                see = next(t for t in await client.list_tools() if t.name == "see")
+                self.assertIn("native_only", see.model_dump(by_alias=True)["inputSchema"]["properties"])
+                result = await client.call_tool("see", {"hwnd": 5, "native_only": True,
+                                                        "max_elements": 2})
+        dispatch.assert_called_once_with("see", {"hwnd": 5, "with_tree": False,
+                                         "native_only": True, "max_elements": 2,
+                                         "timeout_ms": 1500}, 3000)
+        self.assertEqual([b.type for b in result.content], ["text"])
+        self.assertEqual(json.loads(result.content[0].text), meta)
+
     async def call_see(self, payload):
         # Keep the real MCP serialization; replace only desktop execution and
         # its shutdown so these tests never start or stop a desktop worker.

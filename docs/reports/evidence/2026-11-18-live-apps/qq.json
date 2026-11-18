@@ -1,0 +1,311 @@
+{
+  "kind": "live installed QQ",
+  "date_local": "2026-11-18",
+  "expected_main": "联系人",
+  "fallback": "登录",
+  "field_source": "workspace FastMCP in-memory Client -> spawned DeskWeft worker -> LegacyIAccessiblePattern.Name",
+  "comparison_source": "separate runner process -> Windows IUIAutomation.FindAll(exact Name) -> CurrentName and control roles",
+  "account_policy": "normal retained-account auto-login allowed; no explicit login or logout",
+  "flags": [
+    "--force-renderer-accessibility",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=CalculateNativeWinOcclusion"
+  ],
+  "initial_qq_process_count": 0,
+  "exe": "C:\\Program Files\\Tencent\\QQ.exe",
+  "exe_sha256": "7b8c28d34754c4bd8afc80902b0f4098bb01315087f7dd3aac696d6ba9b216b6",
+  "installed_build": "9.9.37-54395",
+  "completed": true,
+  "launch_count": 1,
+  "pages": [
+    {
+      "first_s": 0.0,
+      "last_s": 1.5,
+      "n": 2,
+      "state": {
+        "widgets": 0,
+        "visible": 0,
+        "renderers": 0,
+        "name_hits": {
+          "联系人": 0,
+          "登录": 0
+        },
+        "visible_role_hits": {
+          "联系人": 0,
+          "登录": 0
+        },
+        "uia_errors": 0
+      }
+    },
+    {
+      "first_s": 3.3,
+      "last_s": 3.3,
+      "n": 1,
+      "state": {
+        "widgets": 1,
+        "visible": 1,
+        "renderers": 1,
+        "name_hits": {
+          "联系人": 0,
+          "登录": 1
+        },
+        "visible_role_hits": {
+          "联系人": 0,
+          "登录": 1
+        },
+        "uia_errors": 0
+      }
+    },
+    {
+      "first_s": 7.8,
+      "last_s": 7.8,
+      "n": 1,
+      "state": {
+        "widgets": 4,
+        "visible": 1,
+        "renderers": 1,
+        "name_hits": {
+          "联系人": 1,
+          "登录": 0
+        },
+        "visible_role_hits": {
+          "联系人": 1,
+          "登录": 0
+        },
+        "uia_errors": 0
+      }
+    }
+  ],
+  "fields": {
+    "登录": {
+      "expected": "登录",
+      "legacy_name": "登录",
+      "direct_uia": {
+        "actual": "登录",
+        "role": "ButtonControl",
+        "sibling_role_ids": [
+          50026,
+          50000
+        ],
+        "parent_role_id": 50030
+      },
+      "direct_find_before_and_after": true,
+      "unique_visible_role_match": true
+    },
+    "联系人": {
+      "expected": "联系人",
+      "legacy_name": "联系人",
+      "direct_uia": {
+        "actual": "联系人",
+        "role": "ButtonControl",
+        "sibling_role_ids": [
+          50000,
+          50000
+        ],
+        "parent_role_id": 50021
+      },
+      "direct_find_before_and_after": true,
+      "unique_visible_role_match": true
+    }
+  },
+  "calls": [
+    {
+      "expected": "登录",
+      "window_class": "Chrome_WidgetWin_1",
+      "selector_fields": [
+        "control_type",
+        "rect"
+      ],
+      "ok": true,
+      "execution_state": "completed",
+      "call_completed": true,
+      "result_truncated": false,
+      "result": "登录",
+      "tree": {
+        "timed_out": false,
+        "limit_reached": false,
+        "identity_complete": true,
+        "elements": 46
+      }
+    },
+    {
+      "expected": "联系人",
+      "window_class": "Chrome_WidgetWin_1",
+      "selector_fields": [
+        "control_type",
+        "rect"
+      ],
+      "ok": false,
+      "execution_state": "not_started",
+      "result": null,
+      "reason": "tree incomplete",
+      "tree": {
+        "timed_out": false,
+        "limit_reached": false,
+        "identity_complete": false,
+        "elements": 311
+      }
+    },
+    {
+      "expected": "联系人",
+      "window_class": "Chrome_RenderWidgetHostHWND",
+      "selector_fields": [
+        "control_type",
+        "rect"
+      ],
+      "ok": true,
+      "execution_state": "completed",
+      "call_completed": true,
+      "result_truncated": false,
+      "result": "联系人",
+      "tree": {
+        "timed_out": false,
+        "limit_reached": false,
+        "identity_complete": true,
+        "elements": 311
+      }
+    }
+  ],
+  "input_desktop": "Default",
+  "private_desktop": "DeskWeft_09eb8d29e8a84ddfa6d6c11bf4cbd3c5",
+  "runner_pid": 31376,
+  "root_pid": 1852,
+  "suspended_image_and_job_verified": true,
+  "role_counts": {
+    "Button": 1,
+    "CheckBox": 1,
+    "Document": 1
+  },
+  "version": {
+    "version": "9.9.37",
+    "source": "child_cmdline",
+    "file_version": "9.9.19.35469"
+  },
+  "worker": {
+    "pid": 32800,
+    "tid": 16104,
+    "private_before_after": true,
+    "in_job": true
+  },
+  "native": {
+    "count": 2,
+    "win32_before": 2,
+    "win32_after": 2,
+    "set_equal": true
+  },
+  "page": "main_navigation",
+  "worker_closed": true,
+  "launcher_ok": true,
+  "launcher_error": null,
+  "cleanup": {
+    "complete": true,
+    "active_processes": 0,
+    "errors": []
+  },
+  "observer_installed": true,
+  "observer_removed": true,
+  "job_kill_on_close": true,
+  "runner_exit_code": 0,
+  "input_samples": 208,
+  "input_changes": 0,
+  "desktop_switch_event": false,
+  "elapsed_ms": 12324.139,
+  "foreground_endpoints_equal": true,
+  "focus_or_foreground_events": 0,
+  "focus_or_foreground_events_known_job_pids": 0,
+  "temporary_root_removed": true,
+  "final_qq_process_count": 3,
+  "main_verified": true,
+  "passed": true,
+  "cleanup_followup": {
+    "original_report_sha256": "acd2991f01486d00e48e3533b33ba797ae6e14a4b886672b64c357b142c1cb49",
+    "original_report_written_at": "2026-11-18T16:32:07.262+08:00",
+    "immediate_post_cleanup_QQ_image_count": 3,
+    "original_final_sample_identity_fields_retained": false,
+    "job_active_after_cleanup": 0,
+    "known_original_pids": {
+      "QQ_root": 1852,
+      "runner": 31376,
+      "worker": 32800
+    },
+    "known_original_pids_still_present": [],
+    "independent_counts": {
+      "at": "2026-11-18T16:33:08+08:00",
+      "Get-Process": 4,
+      "Win32_Process": 4
+    },
+    "checked_at": "2026-11-18T16:37:46+08:00",
+    "source": "psutil process identity, image, parent and --type only, Win32 GetThreadDesktop and input desktop identity",
+    "qq_count": 4,
+    "process_read_errors": 0,
+    "processes": [
+      {
+        "pid": 33044,
+        "ppid": 13556,
+        "created_at": "2026-11-18T16:32:12.844+08:00",
+        "created_after_original_report_seconds": 5.582,
+        "same_install_image": true,
+        "known_original_pid": false,
+        "ppid_is_known_original_pid": false,
+        "process_type": "no_type_flag",
+        "parent_kind": "unavailable",
+        "thread_desktop_counts": {
+          "input": 22,
+          "unavailable": 126
+        }
+      },
+      {
+        "pid": 33360,
+        "ppid": 33044,
+        "created_at": "2026-11-18T16:32:13.281+08:00",
+        "created_after_original_report_seconds": 6.019,
+        "same_install_image": true,
+        "known_original_pid": false,
+        "ppid_is_known_original_pid": false,
+        "process_type": "gpu-process",
+        "parent_kind": "QQ",
+        "thread_desktop_counts": {
+          "input": 10,
+          "unavailable": 31
+        }
+      },
+      {
+        "pid": 16604,
+        "ppid": 33044,
+        "created_at": "2026-11-18T16:32:13.317+08:00",
+        "created_after_original_report_seconds": 6.055,
+        "same_install_image": true,
+        "known_original_pid": false,
+        "ppid_is_known_original_pid": false,
+        "process_type": "utility",
+        "parent_kind": "QQ",
+        "thread_desktop_counts": {
+          "input": 2,
+          "unavailable": 21
+        }
+      },
+      {
+        "pid": 13492,
+        "ppid": 33044,
+        "created_at": "2026-11-18T16:32:15.128+08:00",
+        "created_after_original_report_seconds": 7.866,
+        "same_install_image": true,
+        "known_original_pid": false,
+        "ppid_is_known_original_pid": false,
+        "process_type": "renderer",
+        "parent_kind": "QQ",
+        "thread_desktop_counts": {
+          "unavailable": 24
+        }
+      }
+    ],
+    "historical_process_audit": {
+      "Security_4688_4689_for_QQ": "access denied",
+      "Sysmon_Operational": "log unavailable",
+      "Kernel_Process_Analytic": "disabled"
+    },
+    "finding": "The original three entries are absent from this later snapshot. All four observed QQ processes started after the original report was written. One new root on the input desktop has three QQ children. The original sample retained a count only, so individual identity, job membership, and exit cause of those three cannot be reconstructed. The later root parent was unavailable and its launch trigger is unknown.",
+    "followup_launch_count": 0,
+    "followup_termination_count": 0
+  }
+}

@@ -1,12 +1,4 @@
-"""Window-targeted desktop control that never takes the foreground.
-
-Three rules, in order:
-  1. Address one window by handle, never the whole desktop.
-  2. Act through window messages and UIA patterns - neither moves the cursor.
-  3. UIA pattern calls DO steal the foreground (measured, 504-518 ms each).
-     So the only way to touch a window that has no reachable control is to ask
-     the user first, then retry with allow_foreground=True.
-"""
+"""Window-addressed Win32 observation and messaging primitives."""
 
 from __future__ import annotations
 
@@ -311,8 +303,8 @@ user32.IsIconic.argtypes = [wintypes.HWND]
 user32.IsIconic.restype = wintypes.BOOL
 
 
-def children(hwnd: int) -> list[dict]:
-    """Native child windows (classic Win32 controls have their own HWND)."""
+def children(hwnd: int, *, limit: int | None = None) -> list[dict]:
+    """Native child windows, stopping at the optional positive limit."""
     out: list[dict] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -327,7 +319,7 @@ def children(hwnd: int) -> list[dict]:
                 "rect": [r.left, r.top, r.right - r.left, r.bottom - r.top],
             }
         )
-        return True
+        return limit is None or len(out) < limit
 
     user32.EnumChildWindows(hwnd, _cb, 0)
     return out

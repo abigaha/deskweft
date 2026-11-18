@@ -218,13 +218,113 @@ class TestItems(unittest.TestCase):
         self.assertIsNone(result["items"][0]["automation_id"])
         self.assertIn("automation_id", result["items"][0]["read_errors"])
 
-    def test_text_limit_does_not_masquerade_as_a_complete_result(self):
+    def test_oversized_first_item_is_partial_but_pagination_advances(self):
         provider = Provider(2)
         provider.elements[0].CurrentName = "x" * 7000
-        result = self.query(provider)
-        self.assertTrue(result["result_truncated"])
-        self.assertFalse(result["complete"])
-        self.assertLessEqual(len(result["items"][0]["name"]), 6000)
+        page = self.query(provider)
+        self.assertTrue(page["ok"], page)
+        self.assertTrue(page["result_truncated"])
+        self.assertFalse(page["complete"])
+        self.assertEqual(page["returned_count"], 1)
+        self.assertEqual(page["items"][0]["name"], "x" * 6000)
+        self.assertIs(page["has_more"], True)
+        self.assertFalse(page["reached_end"])
+        self.assertEqual(page["next_start_index"], 1)
+        tail = self.query(provider, start_index=page["next_start_index"])
+        self.assertEqual([row["index"] for row in tail["items"]], [1])
+        self.assertTrue(tail["reached_end"])
+        self.assertFalse(tail["complete"])
+
+    def test_oversized_only_item_proves_end_but_not_completeness(self):
+        provider = Provider(1)
+        provider.elements[0].CurrentName = "x" * 7000
+        page = self.query(provider, max_items=1)
+        self.assertTrue(page["ok"], page)
+        self.assertEqual(page["returned_count"], 1)
+        self.assertTrue(page["result_truncated"])
+        self.assertTrue(page["reached_end"])
+        self.assertFalse(page["complete"])
+        self.assertIs(page["has_more"], False)
+        self.assertIsNone(page["next_start_index"])
+
+    def test_budget_keeps_partial_tail_and_its_errors_for_overlap(self):
+        class UnreadableId(Element):
+            @property
+            def CurrentAutomationId(self):
+                raise OSError("not realized")
+
+        provider = Provider(2)
+        provider.elements[0].CurrentName = "a" * 4000
+        provider.elements[1] = UnreadableId(1)
+        provider.elements[1].CurrentName = "b" * 3000
+        page = self.query(provider, max_items=2)
+        self.assertTrue(page["ok"], page)
+        self.assertTrue(page["result_truncated"])
+        self.assertFalse(page["metadata_complete"])
+        self.assertFalse(page["complete"])
+        self.assertEqual(page["returned_count"], 2)
+        self.assertEqual([row["index"] for row in page["items"]], [0, 1])
+        partial = page["items"][1]
+        self.assertEqual(partial["name"], "b" * 2000)
+        self.assertIsNone(partial["automation_id"])
+        self.assertIn("not realized", partial["read_errors"]["automation_id"])
+        self.assertEqual(page["provider_calls"], 2)
+        self.assertFalse(page["reached_end"])
+        self.assertIsNone(page["has_more"])
+        self.assertEqual(page["next_start_index"], 1)
+        tail = self.query(provider, start_index=page["next_start_index"])
+        self.assertEqual([(row["index"], row["name"]) for row in tail["items"]],
+                         [(1, "b" * 3000)])
+        self.assertFalse(tail["result_truncated"])
+
+    def test_partial_tail_overlap_cursor_respects_offset_limit(self):
+        for start, expected in ((9999, 10000), (10000, None)):
+            with self.subTest(start=start):
+                provider = Provider(start + 2)
+                provider.elements[start].CurrentName = "a" * 4000
+                provider.elements[start + 1].CurrentName = "b" * 3000
+                page = self.query(provider, start_index=start, max_items=2)
+                self.assertTrue(page["result_truncated"])
+                self.assertEqual([row["index"] for row in page["items"]], [start, start + 1])
+                self.assertIsNone(page["has_more"])
+                self.assertEqual(page["next_start_index"], expected)
+
+    def test_partial_first_item_keeps_unknown_continuation_on_failed_lookahead(self):
+        for reason in ("provider cycle", "provider error", "query budget exhausted"):
+            with self.subTest(reason=reason):
+                provider = Provider(1)
+                first = provider.elements[0]
+                first.CurrentName = "x" * 7000
+                clock = [0.0]
+
+                def find(previous, *args):
+                    if previous is None:
+                        if reason == "query budget exhausted":
+                            clock[0] = 1.0
+                        return first
+                    if reason == "provider error":
+                        raise OSError("lookahead failed")
+                    return first
+
+                provider.FindItemByProperty = mock.Mock(side_effect=find)
+                with mock.patch.object(items.time, "perf_counter", side_effect=lambda: clock[0]):
+                    page = self.query(provider, timeout_ms=100)
+                self.assertEqual(page.get("reason"), reason, page)
+                self.assertEqual(page["returned_count"], 1)
+                self.assertTrue(page["result_truncated"])
+                self.assertFalse(page["reached_end"])
+                self.assertFalse(page["complete"])
+                self.assertIsNone(page["has_more"])
+                self.assertIsNone(page["next_start_index"])
+                self.assertEqual(provider.FindItemByProperty.call_count,
+                                 1 if reason == "query budget exhausted" else 2)
+
+    def test_offset_limit_reports_more_without_an_invalid_cursor(self):
+        page = self.query(Provider(10002), start_index=10000, max_items=1)
+        self.assertTrue(page["ok"], page)
+        self.assertEqual([row["index"] for row in page["items"]], [10000])
+        self.assertIs(page["has_more"], True)
+        self.assertIsNone(page["next_start_index"])
 
     def test_ambiguous_target_and_unknown_pattern_are_not_empty_lists(self):
         with mock.patch.object(items.tree, "read_detailed", return_value={}), \

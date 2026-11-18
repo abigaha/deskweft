@@ -17,7 +17,7 @@ SKILL.md 给出可执行的操作卡和决策闭环，本文件补充参数边�
 |---|---|---|
 | `windows()` | 列出可见顶层窗口：hwnd、标题、类、pid、rect、foreground | 否 |
 | `app_info(hwnd)` | exe、版本及版本证据来源 | 否 |
-| `see(hwnd, with_tree)` | 截图；with_tree=true 加元素树、native_children、完整性诊断 | 不主动激活；UIA provider 仍须核对副作用/保护 |
+| `see(hwnd, ...)` | 默认截图；`native_only=true` 仅列原生子窗口；`with_tree=true` 返回图、UIA 树、原生子窗口及诊断 | 不主动激活；涉及 UIA provider 时仍须核对副作用/保护 |
 | `click(hwnd, target)` | 点击唯一命中的控件 | 视路线 |
 | `type_text(hwnd, target, text)` | 写入并读回验证 | 视路线 |
 | `key(hwnd, keys)` | 真实键盘快捷键；正文用 type_text | 需授权，且目标实际持焦点 |
@@ -39,7 +39,7 @@ SKILL.md 给出可执行的操作卡和决策闭环，本文件补充参数边�
 |---|---|---|
 | `windows()` | 无参数，仅列可见顶层窗口 | 核对 hwnd/pid/class/title，不能把同标题当同一业务目标 |
 | `app_info(hwnd)` | 已核验 HWND | 查看 exe/version/source/warnings；候选目录不是活动版本证据 |
-| `see(hwnd, with_tree=false, timeout_ms=1500, max_elements=200)` | with_tree=true 才读取树和 native_children；timeout_ms 1..30000，max_elements 1..10000 | 分别检查 image_unavailable 与树的 timed_out/limit_reached/identity_complete/tree_diagnostics；树不完整不能按半树判唯一 |
+| `see(hwnd, with_tree=false, timeout_ms=1500, max_elements=200, native_only=false)` | 只需原生控件用 native_only，与 with_tree 互斥；仍经有界 worker，不调用 PrintWindow 或查询 UIA 树。timeout_ms 1..30000，max_elements 1..10000 | 原生枚举查 native_children_truncated；空表不表示没有 UIA 元素。图和树模式分别查 image_unavailable 与 timed_out/limit_reached/identity_complete/tree_diagnostics；不凭截断列表判唯一 |
 | `click(hwnd, target="", allow_foreground=false)` | 当前唯一目标；明确原生按钮可走消息，否则需前台授权 | queued 只表示排队；语义调用完成也需业务验证，不能因无帧变化立即换路线重放 |
 | `type_text(hwnd, target="", text="", allow_foreground=false)` | 替换该字段全部内容；保存需要恢复的原值。默认空 text 会清空字段，不能漏传正文 | 查 execution_state、effect_verified、verification_reason，并验证完整读回；正文按字面处理，不用于快捷键 |
 | `key(hwnd, keys="", allow_foreground=false)` | 必须授权且目标实际位于可见前台；支持 Ctrl+s、^s、Enter 等键盘表示 | 按业务状态检查保存/导航效果；不能把成功注入按键当业务完成或安全可重发 |
@@ -69,8 +69,8 @@ foreground_preserved 和每窗 still_visible/hide_succeeded。应用可再次显
 
 | 调用 | 关键参数与结果 |
 |---|---|
-| `recall(query, max_body_chars=6000, plan_id="", body_offset=0)` | query 空只列 keys；精确 key、家族/继承和版本未知分别处理。正文预算属于整次响应；truncated 时按指定 plan_id 与 next_body_offset 续读，revision 变就重新读取 |
-| `remember(app, version, plan_id, summary, cost, body, uses_foreground, overwrite=false)` | version=None 为未知版本；plan_id 最多 32 字符。覆盖需 overwrite=true，内容变化会清 reviewed/proven；保留旧失败与未试方向。返回 revision 后再完整 recall 核对 |
+| `recall(query, max_body_chars=6000, plan_id="", body_offset=0)` | query 空只列 keys。正文字数预算由整次响应共享；不指定 plan_id 时传 0 只看摘要目录（没有缺口正文不代表问题已解决）。选一条后用返回的 key 和 plan_id，以默认或正预算从 0 读，再使用 next_body_offset 直到 null；继承计划不要换源 key，revision 变就重新读取 |
+| `remember(app, version, plan_id, summary, cost, body, uses_foreground, overwrite=false, expected_revision=null)` | version=None 为未知版本；plan_id 最多 32 字符。更新用 overwrite=true 及本次读到的 revision，冲突返回 stale plan 而不写；重读并合并新增证据。未传 revision 的旧式覆盖没有此保护。内容变化清 reviewed/proven；写完定向 recall 核对 |
 | `approve(app, version, plan_id, expected_revision, reviewed=true)` | 仅按用户明确确认过的同一内容/revision 设置或撤销 reviewed；stale plan 不能静默刷新摘要重试 |
 | `confirm_proven(app, version, plan_id, expected_revision, proven=true)` | 多次真实成功且取得用户确认后标记；不是自动统计运行次数，也不授予执行权限 |
 | `forget(app, version, plan_id="", expected_revision="", confirm=false)` | 删单条需旧 revision；空 plan_id 删整条记录还需 confirm=true。先核对替代方案已完整存好，不能先删后建 |
@@ -224,7 +224,11 @@ COM/Control 引用。它不调用 Realize、滚动、选择或焦点操作。
 - 出错时保留该项的 `read_errors`、`metadata_complete=false`，并区分"业务必需字段
   已读到"与"附加元数据缺失"：例如 name/id 已读而 IsOffscreen 报错，就保留名单
   并单独报告该错误，**不要丢弃已读名单或无限重试同一 getter**。
-- `next_start_index` 不前进就停止重复查询，保留 partial 换方向。
+- 同页前面已有行时，字符预算可能只够返回尾行的部分字段；此时 `has_more=null`，
+  `next_start_index` 可指向该尾行（大于本页起点），下一页用完整预算重读，不双计。
+  若页首单项就超长，保留该行的 partial，不重试同一索引；以额外一次探测判断有无后项。
+- `has_more=true` 而游标为 null 表示下一起点超过 10000；有后项不等于接口能取到。
+  没有可前进的合法游标就停止该循环，保留 partial，改查导出等有据来源。
 - worker 卡死超时是 `execution_state=unknown`：不当成"应用没有容器"，也不自动重放。
 
 ## 五、已知缺口（当前不修，但要认）

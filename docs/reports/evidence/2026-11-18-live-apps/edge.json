@@ -1,0 +1,117 @@
+{
+  "date": "2026-11-18",
+  "application": "Microsoft Edge",
+  "process": {
+    "image": "msedge.exe",
+    "file_version": "157.0.4341.60",
+    "version_source": "Windows file version resource of the verified process image",
+    "process_image_and_fresh_profile_argument_verified": true,
+    "hidden_startup_requested": true
+  },
+  "fixture": {
+    "navigation": "synthetic local file only, no external page or subresources",
+    "field": "DeskWeft synthetic stock count",
+    "readonly": true,
+    "initial_value": "not-computed",
+    "runtime_calculation": "7 * 15 - 12",
+    "expected": "93",
+    "actual": "93",
+    "matched": true
+  },
+  "uia": {
+    "transport": "FastMCP in-process client -> worktree DeskWeft tool -> real worker IPC -> Windows UIA provider",
+    "tool": "invoke_pattern",
+    "member": "ValuePattern.Value",
+    "allow_foreground": false,
+    "execution_state": "completed",
+    "worker_dispatch_private_before_and_after": true,
+    "owned_window_checks_before": 3,
+    "owned_window_checks_after": 3,
+    "matched_live_runs": 2
+  },
+  "final_run_isolation_and_cleanup": {
+    "launcher_ok": true,
+    "input_desktop_samples": 77,
+    "input_desktop_change_samples": 0,
+    "desktop_switch_observed": false,
+    "foreground_or_focus_events_observed": 0,
+    "job_active_processes_after_cleanup": 0,
+    "cleanup_complete": true,
+    "temporary_root_removed": true
+  },
+  "not_exercised": [
+    "Headless CLI fallback was unnecessary and not executed.",
+    "No installed service transport, native-window MCP observation, existing Edge profile or window, browser history, or debugging endpoint was used.",
+    "Desktop samples and hooks are bounded observations, not continuous proof about all focus changes.",
+    "Page CSP and browser launch flags restricted network use; packet-level egress was not measured."
+  ],
+  "joint_run": {
+    "scope": "One new run on one owned Edge instance and root window; all preceding entries describe the two earlier UIA-only runs.",
+    "edge_file_version": "157.0.4341.60",
+    "process_image_and_fresh_profile_argument_verified": true,
+    "transport": "Same in-process FastMCP client and real DeskWeft worker IPC: Win32 native see, then Windows UIA",
+    "same_worker_dispatch_thread": true,
+    "worker_dispatch_private_before_and_after_each_call": true,
+    "worker_desktop_independently_checked_from_runner": true,
+    "native_see": {
+      "native_only": true,
+      "max_elements": 16,
+      "text_blocks": 1,
+      "image_or_uia_tree": false,
+      "truncated": false,
+      "children": 2,
+      "host_class": "Chrome_WidgetWin_1",
+      "child_classes": ["Chrome_RenderWidgetHostHWND", "Intermediate D3D Window"],
+      "child_handles_and_classes_matched_independent_win32_snapshots": true,
+      "field_label_matches": 0,
+      "field_uniquely_located": false,
+      "limit_of_conclusion": "This enumeration did not identify the field; other Win32 routes were not tested."
+    },
+    "uia": {
+      "member": "ValuePattern.Value",
+      "allow_foreground": false,
+      "execution_state": "completed",
+      "runtime_calculation": "7 * 15 - 12",
+      "expected": "93",
+      "actual": "93",
+      "matched": true
+    },
+    "isolation_and_cleanup": {
+      "launcher_ok": true,
+      "owned_windows_checked_before_and_after": 3,
+      "input_desktop_samples": 84,
+      "input_desktop_change_samples": 0,
+      "desktop_switch_observed": false,
+      "foreground_or_focus_events_observed": 0,
+      "job_active_processes_after_cleanup": 0,
+      "cleanup_complete": true,
+      "temporary_root_removed": true
+    },
+    "exit_code": 0,
+    "exit_guard_checks": {"valid_cases_accepted": 1, "invalid_cases_rejected": 7},
+    "file_handling_recheck": {
+      "invalid_child_results_tested": ["malformed JSON", "JSON array", "read denied"],
+      "invalid_child_results_exited_nonzero_and_cleaned_owned_directory": 3,
+      "existing_files_preserved_and_launch_refused": ["child result", "fixture HTML"],
+      "live_rerun": {
+        "edge_file_version": "157.0.4341.60",
+        "exit_code": 0,
+        "same_private_worker_for_both_reads": true,
+        "native_children": 2,
+        "native_text_blocks": 1,
+        "native_truncated": false,
+        "native_field_label_matches": 0,
+        "expected": "93",
+        "actual": "93",
+        "matched": true,
+        "input_desktop_samples": 81,
+        "input_desktop_change_samples": 0,
+        "desktop_switch_observed": false,
+        "foreground_or_focus_events_observed": 0,
+        "job_active_processes_after_cleanup": 0,
+        "cleanup_complete": true,
+        "temporary_root_removed": true
+      }
+    }
+  }
+}

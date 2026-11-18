@@ -261,6 +261,8 @@ Windows desktop 承载窗口等 UI 对象，交互 window station 同时只有�
 
 使用含 deskweft/FastMCP/psutil 依赖的 Python 环境，并指明要验证的生产 deskweft 源码目录。
 `--repo` 使 runner 和 spawn worker 使用这份实现；不会连接用户桌面上已经运行的旧 MCP。
+先用只读信息核对 QQ 的 exe、版本和无现存实例；须允许临时实例的启停与可逆搜索。私有桌面隔离窗口，不隔离账号或登录态；
+若要求不用个人账号却无法确认启动不复用个人登录态，或其他前提不满足，跳过 launcher 和 identity，不关闭现有 QQ。
 先将以下路径替换为现场实际值。安装在个人 skills 目录时，`$skillDir` 指向安装后的目录，
 不能假设 skill 一定位于 deskweft 仓库中；`$pythonExe` 指向具备相同依赖的解释器。
 
@@ -280,10 +282,8 @@ identity 预检不启动 QQ，通过真实 worker 对无效 HWND 的拒绝路径
 未完成仍不算通过。
 脚本缺失、依赖未安装或身份检查失败时记具体工具缺口，不跳过预检直接做动作。
 
-QQ 步骤须先具备本次启动、关闭和可逆搜索实验的授权；已获授权无需重复询问。
-只有此前没有 QQ 实例、目标 exe 和本版本适用前提都核对后再运行。下面的登录 flag
-表示调用者已经取得“登录当前已保留账户”的范围授权，不会自动选择账号；没有该授权
-时省略它，遇到登录页会停止。不要为让脚本运行而静默关闭用户正在使用的 QQ。
+预检通过后，启动前再确认无现存 QQ。仅获准登录当前保留账号才传下列 flag；省略时，完整树中唯一匹配 `登录` 的 `ButtonControl` 会触发拒绝。
+已登录等无此匹配的情况仍尝试搜索读写与恢复；`qq` 模式不输出实际按钮文案，不用于仅取登录页文案的验收。
 
 ```powershell
 & $pythonExe -X utf8 -B "$skillDir\scripts\private_desktop.py" --out "$probeOutDir\qq.json" -- "$skillDir\scripts\qq_private_probe.py" qq --repo $repoDir --exe 'C:\Program Files\Tencent\QQ.exe' --allow-existing-account-login

@@ -6,7 +6,7 @@ description: Use when automating or probing Windows applications, including nati
 # Windows 应用自动化
 
 本 skill 指导 DeskWeft 的路线选择、实际操作、效果验证和恢复。memory 保存按应用版本
-可复用的路线；MCP 执行有界调用并报告实际状态。先确认当前客户端有哪些工具，
+可复用的路线；MCP 执行有界调用并报告实际状态。需要用工具时，核对当前客户端注册的工具和参数，
 工具尚未实现时写明缺口；源码已有但旧服务/客户端未注册时标部署或重载缺口，
 不能把文档里的候选能力当成已注册工具，也不为补工具擅自中断正在运行的桌面任务。
 
@@ -17,13 +17,15 @@ description: Use when automating or probing Windows applications, including nati
 
 ## 接手一个任务：先取得足够信息，再发下一次调用
 
-1. **定义结果**：用户要哪个应用、哪个页面的什么数据或动作？读取当前项还是全量？
-   需要哪些字段？允许哪些窗口、前台、重启、文件或业务副作用？复用已有授权，
-   不为同一范围重复询问；缺少信息只阻塞依赖它的动作，先做不依赖它的调查。
-2. **核对身份**：用 windows 取 hwnd/pid/title/class，app_info 取 exe、版本和证据。
-   隐藏窗口不在 windows 清单内，启动返回的 hidden_windows 可提供已归属窗口。
-3. **读记忆**：版本确定时 recall("name@version")；未知时先查 recall("name")，
-   将其他版本当候选，不能把较新安装目录或 file_version 自动当活动版本。
+1. **定义结果，先核对已有来源**：确认目标、当前项或全量、必需字段、授权范围和允许的副作用；
+   复用已有授权。先按卡 7 核对已授权的文件、API、CLI 或已有浏览器会话的批次、范围和必需字段；
+   能满足并验证结果就直接交付，不先找窗口或运行应用；只缺部分字段就只补缺口。
+2. **按需核对窗口身份**：只有路线需要窗口且缺少本轮身份时，才用 windows 取 hwnd/pid/title/class；
+   需要 exe、版本与证据时再用 app_info。
+   隐藏窗口不在 windows 清单内，已有启动结果的 hidden_windows 可提供已归属窗口。
+3. **按需读记忆**：支持目录模式时用 recall(query, max_body_chars=0) 查摘要；已知版本用
+   `name@version`，未知用 `name`。按任务范围和适用条件筛一条，再用返回的 key 和该条
+   方案的 id（传为 plan_id）给正预算读全正文。旧版不支持零预算时，用小的正预算筛选。
 4. **选当前可行层**：按下节四级顺序；先核对调用前保护、权限、目标定位和工具契约。
    后台无保护时继续身份/接口调查或其他合格后台候选，不先激活窗口建立“基线”。
 5. **完成最小闭环**：取原状态 → 唯一定位 → 调用一次 → 独立验证目标效果。
@@ -42,15 +44,20 @@ description: Use when automating or probing Windows applications, including nati
 ```
 
 ```json
-{"tool":"recall","arguments":{"query":"example@1.0"}}
+{"tool":"recall","arguments":{"query":"example@1.0","max_body_chars":0}}
+```
+
+```json
+{"tool":"recall","arguments":{"query":"example@1.0","plan_id":"read-status","max_body_chars":2000}}
 ```
 
 检查 app_info 的 source/warnings 和实际活动进程。source=null 表示版本没有证据，
 version=None 的观察写为 app@unversioned；该记录缺失不应借用其他版本的已验证结论。
-recall 的 exact=false、继承和家族匹配都只用于探索，即使返回旧方案的高 rank 也不能升级。
-正文有 truncated 时用同一 plan_id，传 body_offset=该方案返回的 next_body_offset 续读；
-next_body_offset 是返回字段，不是输入参数。每片 revision 必须一致；
-revision 变化就重新读，不能拼接两版步骤。reviewed/proven 不是本次业务操作授权。
+recall 的 exact=false、继承和家族匹配都只用于探索；rank 是已存审阅/实证的标记，不是路线推荐或授权。
+定向读正文时使用返回的匹配 key 作 query；继承方案也用继承记录的 key，不改传 inherits 指向的源键。
+续读沿用同一 query 和 plan_id，把方案返回的 next_body_offset 传入 body_offset，直到 next_body_offset 为 null，
+不凭后页的 truncated 判终点。旧版若拒绝用继承键定向读，记能力缺口。每片 revision 必须一致；
+revision 变化就从头读，不能拼接两版步骤。reviewed/proven 不是本次业务操作授权。
 
 ## 路线顺序：先后台，再在同层比较完整成本
 
@@ -101,21 +108,21 @@ foreground_changed=false，也只是两个采样端点，不能证明全程前�
 | 需求 | 当前路径 | 操作前必须核对 |
 |---|---|---|
 | 需要查看/接管由 MCP 创建的桌面 | private_desktop status/create/show/hide/close | show/hide/close 都须已有授权且 allow_foreground=true；visible_desktop 才是实际输入桌面 |
-| 在非输入桌面运行目标和真实 worker | 随包 launcher + runner，见前台保护参考的执行入口 | 先 identity 预检，再核对目标/renderer/真实 dispatch 归属、效果、恢复和 Job 清理；仅适用于该 runner 支持的任务 |
+| 在非输入桌面运行目标和真实 worker | 随包 launcher + 适用于目标的 runner，见前台保护参考 | 先确认新实例会使用哪份配置、能否完成已授权目标，再核对窗口、renderer、派发线程的桌面归属及 Job 清理 |
 
 private_desktop create 只创建一个桌面，**不会迁移已有目标、服务 worker 或登录会话**；
 把私有 HWND 交给仍在 Default 的服务不构成隔离。show 会占用用户输入桌面，也不是
 后台预览；当前无通用只读预览面板。close 关闭自有句柄，不证明其中全部进程已退出。
 切回失败时保留会话并报告当前 visible_desktop，查明状态后可重试 hide/close。
 
-随包 QQ runner 拒绝已有 QQ 实例；不能为了满足它而关闭用户现有会话。
-它的 identity/可逆搜索流程不是通用发消息脚本，也不证明真实键鼠或任意应用可隔离。
-需要新实例时复用覆盖启动/关闭和实验的既有授权，先按参考执行身份预检；不满足就保留
-工具缺口，继续适用于现有目标的其他通道，不静默重启或切桌面。
+随包 QQ runner 的 `qq` 模式用于临时实例的可逆搜索。仅需公开字段时选只读入口，按目标页面的可见字段判断就绪。已获准自动登录且目标在主界面时，可直接等主界面出现。
+任务依赖现有会话、发现已有 QQ 或启动/关闭与实验未授权时，跳过 launcher 和 identity，
+继续适用于目标的其他通道；不为满足 runner 关闭现有会话，也不静默重启或切桌面。
 
 ## 观察与定位：先区分读不到的原因
 
-具备本次读取的保护和适用依据后，先取得一份有界现场数据：
+已核验 child HWND 就按卡 1 直接读；只需找原生子窗口时，也先按卡 1 调查。
+确需 UIA 树且具备本次读取的保护和适用依据时，再做有界读取：
 
 ```json
 {"tool":"see","arguments":{"hwnd":123456,"with_tree":true,"timeout_ms":3000,"max_elements":600}}
@@ -146,10 +153,19 @@ private_desktop create 只创建一个桌面，**不会迁移已有目标、服�
 
 每张操作卡都服从上述层级、保护和权限；编号不是必须跑完的固定顺序。
 
-### 1. 已有原生 child HWND：直接读取已确认的文本或状态
+### 1. 原生 child HWND：按需发现，直接读取文本或状态
 
-**触发**：native_children 已列出任务对应的 Edit/RichEdit/Static，反复全树定位成本高。
-**操作**：核对 child 的父窗口、class 和业务内容；对它使用托管文本读取。
+**触发**：已核验 child HWND，或本次只需找任务对应的 Edit/RichEdit/Static 等原生子窗口。
+**操作**：已有经本轮核验的 child 就直接读，不再截图或读树。否则，当前 `see` 注册了
+`native_only` 时用下例：仍走有界 worker，只枚举原生子窗口，不截图、不遍历 UIA，不和 `with_tree=true` 同用。
+旧版未注册该参数就不传；优先用现有原生身份来源，确需且保护满足时才用旧版 `with_tree=true`。
+
+```json
+{"tool":"see","arguments":{"hwnd":123456,"native_only":true,"max_elements":200}}
+```
+
+检查 `native_children` 和 `native_children_truncated`；不凭截断列表判唯一，截断或没有 child 都不证明 UIA 不可用。
+核对选中的 child 的父窗口、class 和业务归属后，再对它使用托管文本读取：
 
 ```json
 {"tool":"post_message","arguments":{"hwnd":123457,"msg":13,"wait":true,"max_chars":4096,"timeout_ms":1000}}
@@ -213,6 +229,12 @@ provider 是否只报已加载部分，以及返回 Control 元数据实际代�
 **验证**：检查 items、read_errors、metadata_complete、result_truncated、has_more、
 next_start_index 和 reached_end。find_items 不 Realize、不滚动、不选择；返回的是 provider
 序列，不保证已覆盖未渲染业务数据。某容器不暴露 ScrollPattern 不能推广为整个框架都不支持。
+**续页**：只用严格大于本次 `start_index` 且不超过 10000 的 `next_start_index`。
+非首项触及字符总预算时，保留部分尾行，`has_more=null` 表示尚未探明其后是否还有项；
+若游标指向该尾行，就用新一页的预算从该索引重读，核对索引与业务身份后合并，不双计。
+其他 `has_more=null` 不当作可续。首项自身太长则保持 partial，不重读同一索引；
+只有探明有后续项且未超偏移上限，才用前进游标继续。`has_more=true` 但游标为 null
+表示达到接口偏移上限，停止请求；`has_more=false` 则核对终点与覆盖。
 **转向**：pattern unavailable 且 cause_unknown=true 仍不足以证明 provider 不支持；先查
 真实容器、包装能力和错误。查询无进展保留 partial，继续卡 6/7，不无限重复同一调用。
 
@@ -228,12 +250,13 @@ next_start_index 和 reached_end。find_items 不 Realize、不滚动、不选�
 
 ### 7. 官方 API/CLI、应用导出或已有浏览器接口：取得结构化来源
 
-**触发**：需要大量精确字段、GUI 重复成本高，应用已有适用接口或输出。
-**操作**：核对应用版本和官方接口/CLI/脚本、导出或已有合法浏览器语义/CDP 会话。
-利用已授权来源，不因需要高效率就自行开调试端口、读私有数据库或扩张数据范围。
-**验证**：来源、时间、分页/游标、字段、总数和样本一致；本地文件须确是本次完整输出。
-请求、导出、解析与验证全计入成本。看到本地端口不等于 CDP，须有协议响应证据。
-**转向**：接口不可用则记录具体能力/文档/权限原因，继续适用 GUI 候选；不反复猜端口。
+**触发**：已有授权范围内的文件、官方 API/CLI、应用导出或浏览器会话，哪怕只取一个字段。
+**操作**：直接核对来源和适用条件，不先定位窗口或启动应用；不自行开调试端口、读私有数据库
+或扩大数据范围。看到本地端口不等于 CDP，须有协议响应证据。
+**验证**：批次/时间、业务范围和必需字段符合任务；按需核对样本、总数和分页/游标边界。
+请求、导出、解析与验证全计入成本。
+**转向**：有缺口就记录原因，只用其他已授权来源或适用 GUI 路线补缺口，并核对批次和范围；
+不能对齐时保留 partial，不重复采集已验证部分，不反复猜端口。
 
 ### 8. UWP/WinUI 外壳为空：找到真正内容宿主
 
@@ -335,8 +358,8 @@ retry_safe=true 也不是自动重试指令；先处理失败原因、当前身�
    名称相同不代表同一人，不按姓名去重。AutomationId 只有现场证明业务身份后才可当键。
 3. 相同区间不一致说明列表或顺序可能变化，不能强拼全量；在现有授权内重查必要重叠区，
    或调查稳定导出/API。没有足够字段区分同名项时，保留每行和这个完整性缺口。
-4. has_more=true 且 next_start_index 前进才继续对应分页；没有更多、明确终点时检查覆盖。
-   游标不前进、provider cycle、同页重复或一次滚动不变时停止该循环，保存 partial，换适用方向。
+4. 按卡 5 判断能否续页；重读部分尾行时核对索引与身份，不双计。游标不可用或不前进、
+   provider cycle、同页重复或一次滚动不变时停止该循环，保存 partial，换适用方向。
 5. 后页 complete=false 是正常的后缀语义，不要求它变 true。声称全量须同时有业务范围/总数、
    连续覆盖、重叠一致、可信身份、终止边界和必需字段完整；complete=true 也不替代这些业务证据。
 6. read_errors 单独保留：name/id 已读而 IsOffscreen 报错，不丢弃已读名单，也不隐去错误。
@@ -356,8 +379,15 @@ retry_safe=true 也不是自动重试指令；先处理失败原因、当前身�
 | 完整原值读回、任务相关业务标志 | 验证明确的局部或业务效果 | 其他字段、异步结束或整个任务的完整性 |
 | 同轮保护→动作→验证→恢复→清理证据 | 支持本版本、本条件、本动作的复用 | 跨应用、跨版本或任意方法保证 |
 
-一条 plan 保存一条能重现且可判断适用范围的路线；不要只记“可用/不可用”。先完整召回旧正文，
-新增内容保留失败、未试方向和条件，测量过程/原始证据放报告，记忆保留必要事实与证据指向。
+一条 plan 保存一条能重现且可判断适用范围的路线。summary 写清适用条件、哪些路线不要重复、
+什么新事实才值得重试或下一步查什么；没有事实就写尚未记录，不猜测。
+测量过程/原始证据放报告，记忆留必要事实与证据指向。
+
+修改现有方案前，先按同一 key 和 plan_id 读全同一 revision 的旧正文，保留失败记录、未试方向和适用条件。
+服务支持时，用 `remember(overwrite=true, expected_revision=旧正文的 revision)` 提交。遇到 `stale plan` 就停止覆盖，
+重读同一方案的最新完整正文，把期间新增的失败记录、未试方向及其适用边界合并进去，再用新 revision 提交；
+不能只换 revision 重发旧正文。旧服务不支持校验时，避免多方同时覆盖，优先用新 plan_id 保留增量。
+
 正文八节可按实际信息填，缺失写尚未记录，不猜测：
 
 ```text

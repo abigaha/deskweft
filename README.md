@@ -65,10 +65,11 @@ Eighteen tools cover windows, generic queries, item-container enumeration and me
 - `app_info(hwnd)` — exe, version **and the evidence behind it**: `path_segment` /
   `child_cmdline` are strong, `sole_candidate` / `file_version` / `sibling_dir` are
   weaker and carry a warning, `source=null` means no evidence
-- `see(hwnd, with_tree=false)` — `PrintWindow` capture, the accessibility tree, the
-  native child control handles, and the diagnostics (`timed_out`,
-  `limit_reached`, `identity_complete`, `tree_diagnostics`) that say whether the
-  read was complete
+- `see(hwnd, ...)` — a `PrintWindow` frame by default. Use `native_only=true`
+  for native child handles without a screenshot or UIA walk; check
+  `native_children_truncated` before assuming a match is unique. Use
+  `with_tree=true` instead for image, children and UIA diagnostics
+  (`timed_out`, `limit_reached`, `identity_complete`, `tree_diagnostics`).
 - `find_items(hwnd, target="", property_id=0, value=null, start_index=0,
   max_items=100, timeout_ms=8000)` — bounded ItemContainer queries, including
   items outside the visible tree. NULL and continuation references stay inside
@@ -110,13 +111,19 @@ Eighteen tools cover windows, generic queries, item-container enumeration and me
 
 **Memory**
 
-- `recall(query, ...)` — exact key, or that app's versions as candidates. Each
-  plan carries `uses_foreground`, `reviewed`, `proven`, `rank` and its body. A
-  truncated body comes with `next_body_offset`; continue with
-  `recall(key, plan_id=..., body_offset=next)` and only trust the steps when
-  every piece shares one `revision`
+- `recall(query, ...)` — exact key, or that app's versions as candidates. Use
+  `max_body_chars=0` without a `plan_id` to shortlist by summary, cost, trust
+  and foreground requirements. Read only the selected plan with the returned
+  key and `plan_id` at a positive budget. Follow `next_body_offset` until null;
+  every piece must share one `revision`. Inherited plans stay unverified even
+  after their whole body is read.
 - `remember(app, version, plan_id, summary, cost, body, uses_foreground)` —
-  stores one plan per `app@version`. `version=null` means "not known yet": it is
+  stores a named route under `app@version`. Its summary should distinguish the
+  conditions, what not to repeat, and what would justify a new attempt.
+  For an update, send `overwrite=true` and the `expected_revision` read with
+  that plan. A stale write is refused; read and reconcile intervening evidence
+  instead of replacing the token and resending. Omitting it keeps legacy behavior.
+  `version=null` means "not known yet": it is
   stored as `app@unversioned`, can never be marked reviewed or proven, and is
   never upgraded in place
 - `approve(...)`, `confirm_proven(...)` — the two trust bits, kept separate.
@@ -189,6 +196,11 @@ business total before claiming coverage. Provider order can change, equal data
 items can be skipped, and runtime IDs are only evidence of identity/cycles in
 the current enumeration, not stable cross-page keys. Duplicate names are kept.
 
+When a later row exhausts the text budget, keep its partial data and re-read
+that index with the next page's fresh budget; do not count it twice. A row
+too long even at the start of a page stays partial. Only follow a cursor that
+advances; `has_more=true` without one means the offset limit was reached.
+
 The generic `invoke_pattern.args` contract still rejects null list items and
 arbitrary Control references. `find_items` is the dedicated adaptation for this
 container query. See the [implementation contract](docs/specs/2026-11-08-implementation-handoff.md)
@@ -212,7 +224,9 @@ explicitly labelled; new application facts belong in memory, per version.
 
 The skill compares the current baseline with plausible alternatives using the
 whole cost of locating, invoking and verifying an effect. Memory `rank` records
-trust, not efficiency. It supplies concrete routes: native child text/status
+trust, not efficiency. If the user supplied an authorized export or interface
+that covers the required scope, verify it without finding or launching a window.
+For a desktop route, the skill covers native child text/status
 queries, direct root-pattern reads when the root owns the content, Value/Text/
 Legacy cross-checks, Selection/Grid metadata, list search/pagination/export,
 official APIs/CLIs, UWP content hosts and controlled Electron launch comparisons.
@@ -243,9 +257,9 @@ not on the read-only table:
 }
 ```
 
-Every window tool also reports `foreground_before`, `foreground_after` and
-`foreground_changed`. That is two samples around one call — it cannot prove
-focus was never taken in between, and it never replaces asking first.
+Where a tool reports `foreground_before`, `foreground_after` and
+`foreground_changed`, those are two samples around a call. Matching samples
+do not prove focus was never taken in between or provide permission to act.
 
 ## Install
 
@@ -407,6 +421,16 @@ unsupported; projected metadata is not a reusable element handle.
 
 ## Real-world testing
 
+Run `python tests/live_native_observation.py` for the hidden Win32 fixture.
+`python tests/live_edge_field.py` opens an offline page in a fresh Edge profile
+on a private desktop. It checks the native child windows and reads the
+calculated stock count through UIA. The QQ and Edge results, deployed tool
+signatures, and memory checks are in the [November 18 route audit](docs/reports/2026-11-18-route-audit.md).
+
+With permission to launch QQ and use its normal auto-login, run
+`python tests/live_qq_field.py --live` to read the public navigation button.
+The probe needs the installed QQ executable and an available new instance.
+
 On November 8, 2026, separate live `find_items` tests matched 300 synthetic WPF
 items (including 12 duplicate labels) and 150 Explorer files against independent
 fixture data, using overlapping pages. WPF preserved readable names and IDs
@@ -469,18 +493,19 @@ So the tool hides new windows every pass and takes the foreground back every pas
 until the situation is stable. `foreground_contests` reports how often the app
 tried.
 
-**Verify screen changes with a screenshot.** Every failure mode above reported
-success. No API return value is trusted for anything visible.
+**Verify the requested effect.** A read-back or business marker (for example,
+which page is open) is stronger than a provider return value. A screenshot may
+help, but a cached frame or incidental repaint cannot decide success.
 
 **Credential dialogs stall git commands.** On Windows, `git push` / `git remote
 add` can trigger Git Credential Manager's "Select an account" window (an
 Avalonia top-level window, class `Avalonia-*`). It blocks the command until an
 account is chosen. Its title has no "git" keyword, so a keyword-based window
 scan misses it and the agent waits forever with no output. The rule is shipped
-to every connected client in the server's MCP `instructions`: if a git command
-stalls, call `windows()`, find the new window, then `see(hwnd, with_tree=True)`
-to click the account `ListItem` and `Continue`. Match by title/class, not by pid
-— the dialog belongs to a different process.
+to connected clients in the server's MCP `instructions`: if a git command
+stalls, `windows()` can help identify a credential dialog. Let the user choose
+the account unless they authorize a specific choice. The dialog can belong
+to a different process.
 
 ## License
 

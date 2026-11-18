@@ -9,6 +9,8 @@ from windows_mcp.uia import ControlFromHandle, ControlsAreSame
 
 from . import act, tree
 
+MAX_START_INDEX = 10000
+
 
 def _find_container(root, budget_deadline: float):
     """The first node under `root` that really exposes ItemContainerPattern.
@@ -54,7 +56,7 @@ def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
         return act._fail("invalid target", error, before)
     for name, number, low, high in (
         ("property_id", property_id, 0, 2**31 - 1),
-        ("start_index", start_index, 0, 10000),
+        ("start_index", start_index, 0, MAX_START_INDEX),
         ("max_items", max_items, 1, act.MAX_ITEMS),
         ("timeout_ms", timeout_ms, 1, 30000),
     ):
@@ -80,13 +82,17 @@ def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
     reached_end = False
     has_more = None
 
-    def finish(reason=None, detail="", *, state="unknown"):
+    def finish(reason=None, detail="", *, state="unknown", next_index=None):
         out = act._done(hwnd, "find_items", target, "uia:ItemContainerPattern", before,
                         started) if reason is None else act._fail(reason, detail, before, state=state)
+        if has_more:
+            next_index = start_index + len(rows)
+        if next_index is not None and not start_index < next_index <= MAX_START_INDEX:
+            next_index = None
         out.update(items=rows, start_index=start_index, property_id=property_id,
                    returned_count=len(rows), provider_calls=calls,
                    reached_end=reached_end, has_more=has_more,
-                   next_start_index=(start_index + len(rows) if has_more else None),
+                   next_start_index=next_index,
                    metadata_complete=metadata_complete, result_truncated=truncated,
                    complete=(reason is None and start_index == 0 and reached_end
                              and metadata_complete and not truncated),
@@ -152,7 +158,7 @@ def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
             previous = current
             if index < start_index:
                 continue
-            if len(rows) == max_items:
+            if truncated or len(rows) == max_items:
                 has_more = True
                 return finish()
             row = {"index": index, "runtime_id": list(runtime_id) or None, "read_errors": {}}
@@ -174,10 +180,8 @@ def find_items(hwnd: int, target: str | dict = "", property_id: int = 0,
                     row["read_errors"][key] = f"{type(error).__name__}: {error}"[:160]
                     metadata_complete = False
             rows.append(row)
-            if truncated:
-                # Resume by re-reading this item: its metadata was only partial.
-                out = finish()
-                out["next_start_index"] = index
-                return out
+            if truncated and index > start_index:
+                # Keep the partial row as evidence; overlap it with a fresh budget.
+                return finish(next_index=index)
     except Exception as error:
         return finish("provider error", f"{type(error).__name__}: {error}")

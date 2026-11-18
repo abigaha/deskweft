@@ -1,4 +1,4 @@
-"""server.py: 16 tools, strict schemas, every desktop call through the worker.
+"""server.py: public tools, strict schemas and desktop worker routing.
 
 The MCP surface is exercised in-process; nothing opens a window or a socket.
 """
@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fastmcp import Client
@@ -48,7 +50,7 @@ class TestSurface(unittest.TestCase):
                                        "max_chars"])
         props = tools["remember"].inputSchema["properties"]
         self.assertEqual(list(props), ["app", "version", "plan_id", "summary", "cost",
-                                       "body", "uses_foreground", "overwrite"])
+                                       "body", "uses_foreground", "overwrite", "expected_revision"])
         props = tools["approve"].inputSchema["properties"]
         self.assertEqual(list(props), ["app", "version", "plan_id", "expected_revision",
                                        "reviewed"])
@@ -241,6 +243,27 @@ class TestLifespan(unittest.TestCase):
         close.assert_called_once()
 
 
+class TestMemoryTransport(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_client_cannot_overwrite_new_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(server.memory, "memory_root", return_value=Path(tmp)), \
+             mock.patch.object(server.uia_worker, "close"):
+            async with Client(server.mcp) as client:
+                async def call(tool, **arguments):
+                    result = await client.call_tool(tool, arguments)
+                    return json.loads(result.content[0].text)
+
+                route = dict(app="fixture", version="1", plan_id="export", summary="check batch",
+                             cost="one read", uses_foreground=False)
+                first = await call("remember", **route, body="original")
+                update = dict(**route, overwrite=True, expected_revision=first["revision"])
+                self.assertTrue((await call("remember", **update, body="new evidence"))["ok"])
+                stale = await call("remember", **update, body="outdated")
+                self.assertEqual(stale["reason"], "stale plan")
+                stored = await call("recall", query=first["key"], plan_id="export")
+                self.assertEqual(stored["matches"][0]["plans"][0]["body"], "new evidence")
+
+
 class TestInstructions(unittest.TestCase):
     def test_no_direct_advice_to_click_credential_accounts(self):
         text = server.INSTRUCTIONS
@@ -250,6 +273,11 @@ class TestInstructions(unittest.TestCase):
         text = server.INSTRUCTIONS.lower()
         self.assertNotIn("uia pattern calls do steal the foreground", text)
         self.assertNotIn("user has left", text)
+
+    def test_no_blanket_foreground_guarantee_for_reads(self):
+        text = server.INSTRUCTIONS.lower()
+        self.assertNotIn("never takes the foreground", text)
+        self.assertNotIn("reading is free", text)
 
     def test_no_default_background_legacy_claim(self):
         text = server.INSTRUCTIONS.lower()

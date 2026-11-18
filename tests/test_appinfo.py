@@ -17,7 +17,6 @@ from deskweft import appinfo
 QQ_EXE = r"C:\Program Files\Tencent\QQ.exe"
 QQ_BUILD = r"C:\Program Files\Tencent\versions\9.9.22-40824"
 EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-EDGE_BUILD = r"C:\Program Files (x86)\Microsoft\Edge\Application\157.0.4341.42"
 
 
 class TestVersionRegex(unittest.TestCase):
@@ -36,11 +35,12 @@ class TestVersionRegex(unittest.TestCase):
 
 
 class TestEvidenceLadder(unittest.TestCase):
-    def ladder(self, *, exe=QQ_EXE, children=(), candidates=None, info=None):
+    def ladder(self, *, exe=QQ_EXE, children=(), candidates=None, info=None, sibling=None):
         child = (lambda pid: (children[0], None)) if children else (lambda pid: (None, None))
         with mock.patch.object(appinfo, "_process_path", return_value=exe), \
              mock.patch.object(appinfo, "_child_cmdline_version", side_effect=child), \
              mock.patch.object(appinfo, "_candidate_dirs", return_value=candidates or []), \
+             mock.patch.object(appinfo, "_sibling_version", return_value=sibling), \
              mock.patch.object(appinfo, "_file_version_info", return_value=info or {}):
             return appinfo._version_evidence(1234, exe, info or {})
 
@@ -76,7 +76,7 @@ class TestEvidenceLadder(unittest.TestCase):
         self.assertEqual((version, source), ("157.0.4341.42", "file_version"))
 
     def test_rung_5_sibling_dir(self):
-        version, source, warnings = self.ladder(exe=EDGE_EXE, info={})
+        version, source, warnings = self.ladder(exe=EDGE_EXE, sibling="157.0.4341.42")
         self.assertEqual((version, source), ("157.0.4341.42", "sibling_dir"))
         self.assertTrue(warnings)
 

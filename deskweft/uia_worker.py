@@ -195,12 +195,16 @@ def _make_dispatch() -> dict:
     }
 
 
-def _valid_see(hwnd, with_tree, timeout_ms, max_elements) -> str | None:
+def _valid_see(hwnd, with_tree, timeout_ms, max_elements, native_only) -> str | None:
     if (isinstance(hwnd, bool) or not isinstance(hwnd, int)
             or not 0 < hwnd < 0x10000000 or hwnd == 0xFFFF):
         return "hwnd must be one positive window handle, not a broadcast or sentinel"
     if not isinstance(with_tree, bool):
         return "with_tree must be a bool"
+    if not isinstance(native_only, bool):
+        return "native_only must be a bool"
+    if native_only and with_tree:
+        return "native_only and with_tree cannot both be true"
     for name, value, high in (("timeout_ms", timeout_ms, 30000),
                               ("max_elements", max_elements, 10000)):
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= high:
@@ -209,15 +213,15 @@ def _valid_see(hwnd, with_tree, timeout_ms, max_elements) -> str | None:
 
 
 def _see(hwnd: int, with_tree: bool = False, timeout_ms: int = 1500,
-         max_elements: int = 200) -> dict:
-    """Capture one window and optionally its tree, inside the worker thread.
+         max_elements: int = 200, native_only: bool = False) -> dict:
+    """Observe one window in the worker; native_only skips capture and UIA reads.
 
     This runs where the UIA context lives, so the COM objects it produces are
     projected here and only plain data leaves.
     """
     from . import tree, win32
 
-    problem = _valid_see(hwnd, with_tree, timeout_ms, max_elements)
+    problem = _valid_see(hwnd, with_tree, timeout_ms, max_elements, native_only)
     if problem:
         return {"ok": False, "reason": "invalid arguments", "detail": problem,
                 "execution_state": "not_started"}
@@ -227,6 +231,12 @@ def _see(hwnd: int, with_tree: bool = False, timeout_ms: int = 1500,
 
     meta = {"ok": True, "hwnd": hwnd, "title": win32.title(hwnd),
             "class": win32.class_name(hwnd)}
+    if native_only:
+        children = win32.children(hwnd, limit=max_elements + 1)
+        meta.update(native_only=True, native_children=children[:max_elements],
+                    native_children_truncated=len(children) > max_elements)
+        return {"meta": meta, "png": None}
+
     png = None
     grabbed = win32.grab(hwnd)
     if grabbed is None:

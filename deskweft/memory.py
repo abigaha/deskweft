@@ -242,6 +242,8 @@ def _read(root: Path, path: Path) -> dict:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise Invalid("plan not found", f"{path.name} does not exist") from None
+    except UnicodeDecodeError as error:
+        raise Invalid("invalid record", f"bad UTF-8: {error}") from None
     except OSError as error:
         raise Invalid("read failed", f"{type(error).__name__}: {error}") from None
     try:
@@ -357,7 +359,7 @@ def _plans(record: dict) -> list[dict]:
 
 
 def _app_of(query: str) -> str | None:
-    if "\\" in query or "/" in query or query.casefold().endswith(".exe"):
+    if "\\" in query or "/" in query or ("@" not in query and query.casefold().endswith(".exe")):
         from pathlib import PureWindowsPath
 
         stem = PureWindowsPath(query).stem
@@ -372,26 +374,31 @@ def _match_plan(record: dict, plan_id: str) -> dict | None:
     return None
 
 
-def _as_plan(key: str, plan: dict, inherited: bool, budget: list[int], offset: int = 0) -> dict:
-    total = len(plan["body"])
-    remaining = max(0, budget[0])
-    piece = plan["body"][offset:offset + remaining]
-    budget[0] -= len(piece)
-    end = offset + len(piece)
-    revision = plan_revision(key, plan)
-    return {
+def _as_plan(key: str, plan: dict, inherited: bool, budget: list[int] | None,
+             offset: int = 0) -> dict:
+    metadata = {
         "id": plan["id"], "summary": plan["summary"], "cost": plan["cost"],
         "uses_foreground": plan["uses_foreground"],
         "reviewed": False if inherited else plan["reviewed"],
         "proven": False if inherited else plan["proven"],
         "rank": 0 if inherited else rank(plan["reviewed"], plan["proven"]),
-        "body": piece, "truncated": bool(offset or end < total), "revision": revision,
+        "revision": plan_revision(key, plan),
+    }
+    if budget is None:
+        return metadata
+    total = len(plan["body"])
+    remaining = max(0, budget[0])
+    piece = plan["body"][offset:offset + remaining]
+    budget[0] -= len(piece)
+    end = offset + len(piece)
+    return metadata | {
+        "body": piece, "truncated": bool(offset or end < total),
         "body_offset": offset, "body_total_chars": total,
         "next_body_offset": end if end < total else None,
     }
 
 
-def _as_match(root: Path, record: dict, budget: list[int], plans: list[dict] | None = None) -> dict:
+def _as_match(record: dict, budget: list[int] | None, plans: list[dict] | None = None) -> dict:
     inherited = "see" in record
     key = record["key"]
     if plans is None:
@@ -409,15 +416,17 @@ def _as_match(root: Path, record: dict, budget: list[int], plans: list[dict] | N
 
 def recall(query: str, max_body_chars: int = DEFAULT_MAX_BODY_CHARS,
            plan_id: str = "", body_offset: int = 0) -> dict:
+    """An empty query lists keys; a nonempty query with zero budget previews plan metadata."""
     try:
         if not isinstance(query, str):
             raise Invalid("invalid query", repr(query))
         text = query.strip()
-        if text.lower().endswith(".exe") and "@" in text:
+        if "@" in text and text.casefold().endswith(".exe") and ("\\" in text or "/" in text):
             raise Invalid("invalid query", repr(query))
         if text.count("@") > 1 or text.startswith("@") or text.endswith("@"):
             raise Invalid("invalid query", repr(query))
-        budget = [_check_int(max_body_chars, 1, DEFAULT_MAX_BODY_CHARS, "max_body_chars")]
+        max_body_chars = _check_int(max_body_chars, 1 if plan_id else 0,
+                                    DEFAULT_MAX_BODY_CHARS, "max_body_chars")
         if isinstance(body_offset, bool) or not isinstance(body_offset, int) or body_offset < 0:
             raise Invalid("invalid offset", repr(body_offset))
         if plan_id and not text:
@@ -426,33 +435,28 @@ def recall(query: str, max_body_chars: int = DEFAULT_MAX_BODY_CHARS,
             raise Invalid("invalid offset", "body_offset needs a plan_id to continue from")
         root = memory_root()
         if plan_id:
-            return _recall_one(root, text, plan_id, budget, body_offset)
-        return _recall_many(root, text, budget)
+            return _recall_one(root, text, plan_id, [max_body_chars], body_offset)
+        return _recall_many(root, text, [max_body_chars] if max_body_chars else None)
     except Invalid as error:
         return {"ok": False, "reason": error.reason, "detail": error.detail}
 
 
 def _recall_one(root: Path, key: str, plan_id: str, budget: list[int], offset: int) -> dict:
     _check_plan_id(plan_id)
-    records, _ = _scan(root)
-    record = next((r for r in records if r["key"] == key), None)
-    if record is None or "see" in record:
-        raise Invalid("plan not found", f"{key} has no readable record; continuation needs a stored key")
+    record = _load_key(root, key)
     plan = _match_plan(record, plan_id)
     if plan is None:
         raise Invalid("plan not found", f"{key} has no plan {plan_id}")
     total = len(plan["body"])
     if offset > total:
         raise Invalid("invalid offset", f"{offset} is past the end of {total} characters")
-    match = _as_match(root, record, budget, plans=[_as_plan(key, plan, False, budget, offset)])
-    gaps = []
-    for plan_ in record["plans"]:
-        body = _unresolved_text(plan_["body"])
-        if body is not None:
-            gaps.append({"plan_id": plan_["id"], "text": body})
-    match["unresolved"] = _budget_gaps(gaps, budget)
+    page = _as_plan(key, plan, "see" in record, budget, offset)
+    match = _as_match(record, budget, plans=[page])
+    gap = _unresolved_text(plan["body"])
+    if gap is not None:
+        match["unresolved"] = _budget_gaps([{"plan_id": plan_id, "text": gap}], budget)
     return {"ok": True, "matches": [match], "exact": True,
-            "truncated": any(p["truncated"] for p in match["plans"]),
+            "truncated": page["truncated"] or any(gap["truncated"] for gap in match["unresolved"]),
             "warnings": []}
 
 
@@ -470,13 +474,12 @@ def _exact_record(root: Path, key: str) -> dict | None:
     return _load_key(root, key)
 
 
-def _recall_many(root: Path, text: str, budget: list[int]) -> dict:
+def _recall_many(root: Path, text: str, budget: list[int] | None) -> dict:
+    records, warnings = _scan(root)
     if not text:
-        records, warnings = _scan(root)
         keys = sorted(record["key"] for record in records)
         return {"ok": True, "keys": keys, "matches": [], "exact": False,
                 "truncated": False, "warnings": warnings}
-    records, warnings = _scan(root)
     if not records and not (root / "playbooks").exists():
         # A missing root is "nothing stored yet", not a failure.
         return {"ok": True, "matches": [], "exact": False, "truncated": False, "warnings": []}
@@ -506,7 +509,10 @@ def _recall_many(root: Path, text: str, budget: list[int]) -> dict:
         chosen = [r for r in records if low in r["app"].casefold()]
 
     chosen.sort(key=lambda record: record["key"])
-    matches = [_as_match(root, record, budget) for record in chosen]
+    matches = [_as_match(record, budget) for record in chosen]
+    if budget is None:
+        return {"ok": True, "matches": matches, "exact": exact, "truncated": False,
+                "warnings": warnings}
     truncated = False
     for match, record in zip(matches, chosen):
         gaps = []
@@ -543,7 +549,7 @@ def _today() -> str:
 
 def remember(app: str, version: str | None, plan_id: str, summary: str,
              cost: str, body: str, uses_foreground: bool,
-             overwrite: bool = False) -> dict:
+             overwrite: bool = False, expected_revision: str | None = None) -> dict:
     try:
         app = _check_app(app)
         version = _check_version(version)
@@ -555,6 +561,11 @@ def remember(app: str, version: str | None, plan_id: str, summary: str,
             raise Invalid("invalid uses_foreground", "pass true when the side effects are unknown")
         if not isinstance(overwrite, bool):
             raise Invalid("invalid arguments", "overwrite must be a bool")
+        if expected_revision is not None:
+            if not isinstance(expected_revision, str) or not expected_revision.strip():
+                raise Invalid("invalid revision", "expected_revision must be a non-empty string")
+            if not overwrite:
+                raise Invalid("invalid arguments", "expected_revision requires overwrite=true")
         key = make_key(app, version)
         root = memory_root()
         path = record_path(root, key)
@@ -577,6 +588,10 @@ def remember(app: str, version: str | None, plan_id: str, summary: str,
                 for plan in record["plans"]:
                     plan["reviewed"] = plan["proven"] = False
             existing = next((p for p in record["plans"] if p["id"] == plan_id), None)
+            if expected_revision is not None and (
+                existing is None or plan_revision(key, existing) != expected_revision
+            ):
+                raise Invalid("stale plan", "the plan changed or was removed; read it again before overwriting")
             if existing is None:
                 record["plans"].append({"id": plan_id, "summary": summary, "cost": cost,
                                         "body": body, "uses_foreground": uses_foreground,

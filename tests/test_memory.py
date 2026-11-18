@@ -126,6 +126,32 @@ class TestSchema(MemoryCase):
         self.assertFalse(exact["ok"])
         self.assertEqual(exact["reason"], "invalid record")
 
+    def test_bad_utf8_is_isolated_and_not_overwritten(self):
+        self.assertTrue(self.write_plans()["ok"])
+        key = "qq@9.9.19"
+        path = memory.record_path(self.root, key)
+        damaged = b"---\n\xff\n---\n"
+        path.write_bytes(damaged)
+
+        listing = memory.recall("")
+        self.assertEqual(listing["keys"], ["qq@9.9.22"])
+        self.assertEqual([warning["file"] for warning in listing["warnings"]], [path.name])
+        healthy = memory.recall("qq@9.9.22")
+        self.assertTrue(healthy["exact"])
+        self.assertEqual(healthy["warnings"], listing["warnings"])
+        self.assertTrue(memory.recall("qq@9.9.22", plan_id="B")["ok"])
+        catalog = memory.recall("qq", max_body_chars=0)
+        self.assertEqual([match["key"] for match in catalog["matches"]], listing["keys"])
+        self.assertEqual(catalog["warnings"], listing["warnings"])
+        for kwargs in ({}, {"plan_id": "B"}, {"max_body_chars": 0}):
+            result = memory.recall(key, **kwargs)
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["reason"], "invalid record")
+        result = memory.remember("QQ", "9.9.19", "B", "s", "c", "replacement", False,
+                                 overwrite=True)
+        self.assertEqual(result["reason"], "invalid record")
+        self.assertEqual(path.read_bytes(), damaged)
+
     def test_date_parsed_into_object_is_rejected(self):
         self.write_plans()
         # Take the real date from the record: the fixture is written with
@@ -169,11 +195,14 @@ class TestSchema(MemoryCase):
         text = self.read_file().replace("key: qq@9.9.22", "key: qq@1.0")
         memory.record_path(self.root, "qq@9.9.22").write_text(text, encoding="utf-8")
         self.assertEqual(memory.recall("qq@9.9.22")["reason"], "invalid record")
+        self.assertEqual(memory.recall("qq@9.9.22", plan_id="B")["reason"], "invalid record")
 
     def test_missing_root_reads_as_empty(self):
         empty = self.root / "never-created"
         with mock.patch.object(memory, "memory_root", return_value=empty):
             result = memory.recall("")
+            self.assertEqual(memory.recall("", max_body_chars=0), result)
+            self.assertEqual(memory.recall("qq", max_body_chars=0), memory.recall("qq"))
         self.assertTrue(result["ok"])
         self.assertEqual(result["keys"], [])
 
@@ -282,7 +311,7 @@ class TestMatching(MemoryCase):
         self.assertFalse(result["exact"])
 
     def test_illegal_query(self):
-        for query in ("@", "@9.9", "qq@"):
+        for query in ("@", "@9.9", "qq@", "qq@@9.9", r"C:\Tools\qq@build.exe"):
             result = memory.recall(query)
             self.assertFalse(result["ok"], query)
             self.assertEqual(result["reason"], "invalid query", query)
@@ -297,6 +326,57 @@ class TestMatching(MemoryCase):
 
 
 class TestBudgetAndContinuation(MemoryCase):
+    def test_empty_query_lists_only_keys_even_at_zero_budget(self):
+        self.assertTrue(self.write_plans()["ok"])
+        listing = memory.recall("")
+        self.assertEqual(listing["keys"], ["qq@9.9.22"])
+        self.assertEqual(listing["matches"], [])
+        self.assertEqual(memory.recall("", max_body_chars=0), listing)
+        self.assertEqual(memory.recall("   ", max_body_chars=0), listing)
+
+    def test_exe_version_catalog_key_can_be_used_for_exact_recall(self):
+        self.assertTrue(self.write_plans(app="demo", version="build.exe", body="abcdef")["ok"])
+        match = memory.recall(r"C:\Tools\demo.exe", max_body_chars=0)["matches"][0]
+        self.assertEqual(match["key"], "demo@build.exe")
+        plan = match["plans"][0]
+        exact = memory.recall(match["key"], max_body_chars=0)
+        self.assertTrue(exact["ok"], exact)
+        self.assertTrue(exact["exact"])
+        self.assertEqual(exact["matches"], [match])
+        page = memory.recall(match["key"], max_body_chars=3, plan_id=plan["id"], body_offset=3)
+        self.assertTrue(page["ok"], page)
+        selected = page["matches"][0]["plans"][0]
+        self.assertEqual((selected["body"], selected["revision"]), ("def", plan["revision"]))
+
+    def test_nonempty_zero_budget_query_filters_plan_metadata(self):
+        self.assertTrue(self.write_plans()["ok"])
+        self.assertTrue(self.write_plans(app="Other", version="1")["ok"])
+        self.assertTrue(self.write_plans(plan_id="A")["ok"])
+        source = memory.recall("qq@9.9.22", plan_id="B")["matches"][0]["plans"][0]
+        self.assertTrue(memory.confirm_proven("QQ", "9.9.22", "B", source["revision"])["ok"])
+
+        catalog = memory.recall("qq", max_body_chars=0)
+        self.assertTrue(catalog["ok"], catalog)
+        self.assertEqual([match["key"] for match in catalog["matches"]], ["qq@9.9.22"])
+        match = catalog["matches"][0]
+        self.assertEqual([plan["id"] for plan in match["plans"]], ["B", "A"])
+        self.assertEqual(match["unresolved"], [])
+        self.assertFalse(catalog["truncated"])
+        plan = match["plans"][0]
+        self.assertEqual(plan, {"id": "B", "summary": "summary", "cost": "cost", "rank": 2,
+                                "uses_foreground": False, "revision": source["revision"],
+                                "reviewed": False, "proven": True})
+
+        for query in ("qq", "QQ.exe", r"C:\Program Files\Tencent\QQ.exe", "qq@9.9.22"):
+            with self.subTest(query=query):
+                catalog = memory.recall(query, max_body_chars=0)
+                self.assertEqual(catalog["matches"], [match])
+                self.assertEqual(catalog["exact"], query == match["key"])
+        page = memory.recall(match["key"], max_body_chars=4, plan_id=plan["id"])
+        selected = page["matches"][0]["plans"][0]
+        self.assertEqual((selected["body_offset"], selected["body"]), (0, QQ_BODY[:4]))
+        self.assertEqual(selected["revision"], plan["revision"])
+
     def test_whole_response_stays_inside_the_body_budget(self):
         long_unresolved = "## 未解决\n" + ("x" * 4000) + "\n"
         body = "## 目标\n" + ("y" * 5000) + "\n" + long_unresolved
@@ -329,7 +409,11 @@ class TestBudgetAndContinuation(MemoryCase):
     def test_continuation_requires_exact_key_and_existing_plan(self):
         self.write_plans()
         self.assertEqual(memory.recall("qq", plan_id="B")["reason"], "plan not found")
-        self.assertEqual(memory.recall("qq@9.9.22", plan_id="Z")["reason"], "plan not found")
+        for key, plan_id in (("qq@9.9.22", "Z"), ("qq@9.9.19", "B")):
+            with self.subTest(key=key, plan_id=plan_id):
+                result = memory.recall(key, plan_id=plan_id)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["reason"], "plan not found")
 
     def test_bad_offsets(self):
         self.write_plans()
@@ -352,8 +436,16 @@ class TestBudgetAndContinuation(MemoryCase):
 
     def test_bad_budget(self):
         self.write_plans()
-        for value in (0, 6001, True, "500"):
+        for value in (-1, 6001, False, True, "500"):
             self.assertFalse(memory.recall("qq", max_body_chars=value)["ok"], value)
+
+    def test_zero_budget_cannot_read_or_continue_a_plan(self):
+        self.write_plans()
+        for offset in (0, 1):
+            result = memory.recall("qq@9.9.22", max_body_chars=0, plan_id="B", body_offset=offset)
+            self.assertEqual(result["reason"], "invalid arguments")
+        self.assertEqual(memory.recall("qq", max_body_chars=0, body_offset=1)["reason"],
+                         "invalid offset")
 
 
 class TestTrust(MemoryCase):
@@ -431,6 +523,53 @@ class TestTrust(MemoryCase):
         self.assertEqual(clash["reason"], "plan exists")
         self.assertEqual(len(memory.recall("qq@9.9.22")["matches"][0]["plans"]), 1)
 
+    def test_remember_expected_revision_does_not_lose_first_writer_evidence(self):
+        self.assertTrue(self.write_plans()["ok"])
+        revision_a, revision_b = self.revision(), self.revision()
+        evidence = QQ_BODY + "failure evidence\n"
+        saved = memory.remember("QQ", "9.9.22", "B", "summary", "cost", evidence, False,
+                                overwrite=True, expected_revision=revision_a)
+        self.assertTrue(saved["ok"], saved)
+        path = memory.record_path(self.root, "qq@9.9.22")
+        before = path.read_bytes()
+        stale = memory.remember("QQ", "9.9.22", "B", "summary", "cost", QQ_BODY + "other\n", False,
+                                overwrite=True, expected_revision=revision_b)
+        self.assertFalse(stale["ok"], stale)
+        self.assertEqual(stale["reason"], "stale plan")
+        self.assertEqual(path.read_bytes(), before)
+        plan = memory.recall("qq@9.9.22", plan_id="B")["matches"][0]["plans"][0]
+        self.assertEqual((plan["body"], plan["revision"]), (evidence, saved["revision"]))
+
+    def test_remember_expected_revision_does_not_recreate_deleted_plan(self):
+        for version, keep_other_plan in (("9.9.22", False), ("9.9.19", True)):
+            with self.subTest(keep_other_plan=keep_other_plan):
+                self.assertTrue(self.write_plans(version=version)["ok"])
+                if keep_other_plan:
+                    self.assertTrue(self.write_plans(version=version, plan_id="A")["ok"])
+                revision = self.revision(version=version)
+                removed = memory.forget("QQ", version, "B", revision)
+                self.assertTrue(removed["ok"], removed)
+                path = memory.record_path(self.root, f"qq@{version}")
+                before = path.read_bytes() if keep_other_plan else None
+                stale = memory.remember("QQ", version, "B", "summary", "cost", QQ_BODY, False,
+                                        overwrite=True, expected_revision=revision)
+                self.assertFalse(stale["ok"], stale)
+                self.assertEqual(stale["reason"], "stale plan")
+                self.assertEqual(path.exists(), keep_other_plan)
+                if keep_other_plan:
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_remember_expected_revision_requires_nonempty_string_and_overwrite(self):
+        for revision in ("", "   ", False, 123):
+            with self.subTest(revision=revision):
+                result = memory.remember("QQ", "9.9.22", "B", "s", "c", "new", False,
+                                         overwrite=True, expected_revision=revision)
+                self.assertEqual(result["reason"], "invalid revision")
+        result = memory.remember("QQ", "9.9.22", "B", "s", "c", "new", False,
+                                 expected_revision="previous")
+        self.assertEqual(result["reason"], "invalid arguments")
+        self.assertEqual(memory.recall("")["keys"], [])
+
     def test_required_text_fields(self):
         for field in ("summary", "cost", "body"):
             kwargs = dict(app="QQ", version="9.9.22", plan_id="B", summary="s", cost="c",
@@ -506,12 +645,54 @@ class TestInheritance(MemoryCase):
         self.assertFalse(match["plans"][0]["proven"])
         self.assertTrue(memory.recall("qq@9.9.19")["exact"])
 
+    def test_inherited_catalog_can_open_selected_plan_at_zero_offset(self):
+        source = self.write_plans(body="ABCDEFGHIJ")
+        self.assertTrue(memory.confirm_proven("QQ", "9.9.22", "B", source["revision"])["ok"])
+        self.write_inherited()
+        catalog = memory.recall("qq", max_body_chars=0)
+        self.assertTrue(catalog["ok"], catalog)
+        match = catalog["matches"][0]
+        self.assertEqual((match["key"], match["inherits"]), ("qq@9.9.19", "qq@9.9.22"))
+        plan = match["plans"][0]
+        self.assertEqual(plan["rank"], 0)
+        page = memory.recall(match["key"], max_body_chars=4, plan_id=plan["id"])
+        selected = page["matches"][0]["plans"][0]
+        self.assertEqual((selected["body"], selected["rank"], selected["revision"]),
+                         ("ABCD", 0, plan["revision"]))
+
     def test_inheritance_follows_exactly_one_level(self):
         self.write_plans()
         self.write_inherited(version="9.9.19", source="qq@9.9.22")
         self.write_inherited(version="9.9.10", source="qq@9.9.19")
         self.assertEqual(memory.recall("qq@9.9.10")["reason"], "invalid record")
-        self.assertEqual(memory.recall("qq@9.9.19", plan_id="B")["reason"], "plan not found")
+        self.assertEqual(memory.recall("qq@9.9.10", plan_id="B")["reason"], "invalid record")
+
+    def test_inherited_continuation_keeps_key_revision_and_no_trust(self):
+        source = self.write_plans(body="ABCDEFGHIJ")
+        for mark in (memory.approve, memory.confirm_proven):
+            self.assertTrue(mark("QQ", "9.9.22", "B", source["revision"])["ok"])
+        alias = self.write_inherited()
+        before = alias.read_bytes()
+        key = "qq@9.9.19"
+        first = memory.recall(key, max_body_chars=4)["matches"][0]["plans"][0]
+        revision = first["revision"]
+        self.assertNotEqual(revision, source["revision"])
+        self.assertEqual((first["body"], first["next_body_offset"]), ("ABCD", 4))
+        offset = first["next_body_offset"]
+        for text, next_offset in (("EFGH", 8), ("IJ", None)):
+            page = memory.recall(key, max_body_chars=4, plan_id="B", body_offset=offset)
+            self.assertTrue(page["ok"], page)
+            self.assertTrue(page["exact"])
+            match = page["matches"][0]
+            self.assertEqual((match["key"], match["inherits"]), (key, "qq@9.9.22"))
+            plan = match["plans"][0]
+            self.assertEqual((plan["body"], plan["next_body_offset"]), (text, next_offset))
+            self.assertEqual(plan["revision"], revision)
+            self.assertEqual((plan["rank"], plan["reviewed"], plan["proven"]), (0, False, False))
+            offset = plan["next_body_offset"]
+        for mark in (memory.approve, memory.confirm_proven):
+            self.assertEqual(mark("QQ", "9.9.19", "B", revision)["reason"], "inherited record")
+        self.assertEqual(alias.read_bytes(), before)
 
     def test_self_reference_and_missing_source(self):
         self.write_inherited(version="9.9.19", source="qq@9.9.19")
@@ -531,6 +712,22 @@ class TestInheritance(MemoryCase):
         match = memory.recall("qq@9.9.19")["matches"][0]
         self.assertIsNone(match["inherits"])
         self.assertEqual(match["plans"][0]["body"], "new\n")
+
+    def test_remember_expected_revision_uses_inherited_key_without_copying_trust(self):
+        source = self.write_plans()
+        self.assertTrue(memory.confirm_proven("QQ", "9.9.22", "B", source["revision"])["ok"])
+        alias = self.write_inherited()
+        before = alias.read_bytes()
+        plan = memory.recall("qq@9.9.19", plan_id="B")["matches"][0]["plans"][0]
+        args = ("QQ", "9.9.19", "B", "summary", "cost", QQ_BODY, False)
+        stale = memory.remember(*args, overwrite=True, expected_revision=source["revision"])
+        self.assertFalse(stale["ok"], stale)
+        self.assertEqual(stale["reason"], "stale plan")
+        self.assertEqual(alias.read_bytes(), before)
+        saved = memory.remember(*args, overwrite=True, expected_revision=plan["revision"])
+        self.assertTrue(saved["ok"], saved)
+        self.assertEqual((saved["revision"], saved["rank"]), (plan["revision"], 0))
+        self.assertIsNone(memory.recall("qq@9.9.19")["matches"][0]["inherits"])
 
     def test_approve_cannot_touch_an_inherited_record(self):
         self.write_plans()
@@ -570,6 +767,34 @@ class TestUnresolved(MemoryCase):
         match = memory.recall("qq@9.9.22")["matches"][0]
         self.assertEqual(match["unresolved"][0]["plan_id"], "B")
         self.assertFalse(match["unresolved"][0]["truncated"])
+
+    def test_direct_recall_only_reports_selected_plan_gap(self):
+        key = "qq@9.9.22"
+        expected = {"A": "first gap", "B": "second gap"}
+        for plan_id, text in expected.items():
+            self.assertTrue(self.write_plans(plan_id=plan_id, body=f"## 未解决\n{text}\n")["ok"])
+        for plan_id, text in expected.items():
+            with self.subTest(plan_id=plan_id):
+                result = memory.recall(key, plan_id=plan_id)
+                match = result["matches"][0]
+                self.assertEqual([plan["id"] for plan in match["plans"]], [plan_id])
+                self.assertEqual(match["unresolved"], [{"plan_id": plan_id, "text": text,
+                                                        "truncated": False}])
+                self.assertFalse(result["truncated"])
+        gaps = memory.recall(key)["matches"][0]["unresolved"]
+        self.assertEqual({gap["plan_id"]: gap["text"] for gap in gaps}, expected)
+
+    def test_direct_recall_reports_gap_truncated_even_when_body_is_complete(self):
+        body = "## 未解决\nabcdef\n"
+        self.assertTrue(self.write_plans(body=body)["ok"])
+        result = memory.recall("qq@9.9.22", plan_id="B", max_body_chars=len(body) + 2)
+        match = result["matches"][0]
+        plan = match["plans"][0]
+        self.assertEqual(plan["body"], body)
+        self.assertFalse(plan["truncated"])
+        self.assertIsNone(plan["next_body_offset"])
+        self.assertEqual(match["unresolved"], [{"plan_id": "B", "text": "ab", "truncated": True}])
+        self.assertTrue(result["truncated"])
 
 
 class TestRevision(MemoryCase):
